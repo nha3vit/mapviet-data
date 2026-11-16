@@ -1,0 +1,94 @@
+# Copy this file to <owner>/mapviet-data : .github/workflows/build-network.yml
+# Builds the MapViet road-network pack from the latest OpenStreetMap Vietnam
+# extract every day and publishes it as a GitHub Release ("latest").
+# Required repo secret: MAPVIET_SIGNING_KEY  (EC P-256 private key, PEM text)
+name: build-network
+
+on:
+  schedule:
+    - cron: "30 1 * * *"     # 08:30 Vietnam time, after Geofabrik's nightly extract
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-network
+  cancel-in-progress: false
+
+env:
+  PBF_URL: https://download.geofabrik.de/asia/vietnam-latest.osm.pbf
+  VIETHUD_REPO: https://github.com/911273/VietHUD.git
+  VIETHUD_REF: 1f1f986          # pinned pipeline version (bump deliberately)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install "osmium>=3.6,<5"
+
+      - name: Download OSM Vietnam (verify md5)
+        run: |
+          curl -fsSL -o vietnam.osm.pbf "$PBF_URL"
+          curl -fsSL "$PBF_URL.md5" | awk '{print $1"  vietnam.osm.pbf"}' > pbf.md5
+          md5sum -c pbf.md5
+          echo "OSM_DATE=$(curl -fsSIL "$PBF_URL" | awk -F': ' 'tolower($1)=="last-modified"{print $2}' | tail -1 | tr -d '\r')" >> "$GITHUB_ENV"
+
+      - name: Skip if OSM unchanged since last release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh release view --json body -q .body 2>/dev/null | grep '^osm_date:' | cut -d' ' -f2- || true)
+          if [ "$last" = "$OSM_DATE" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "OSM unchanged ($OSM_DATE)"
+          fi
+
+      - name: Fetch VietHUD pipeline (pinned)
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git clone --filter=blob:none --no-checkout "$VIETHUD_REPO" viethud
+          git -C viethud checkout "$VIETHUD_REF" -- tools/viethud-pipeline
+
+      - name: Build network from OSM
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          export VIETHUD_PIPELINE_HOME="$PWD/pipe_home"
+          mkdir -p pipe_home/empty out
+          cd viethud/tools/viethud-pipeline
+          python synthesize_and_pack.py --pbf "$GITHUB_WORKSPACE/vietnam.osm.pbf" \
+            --out "$GITHUB_WORKSPACE/out" --region VN --custom-alerts "$GITHUB_WORKSPACE/pipe_home/empty"
+
+      - name: Package + sign
+        if: steps.check.outputs.skip != 'true'
+        env:
+          MAPVIET_SIGNING_KEY: ${{ secrets.MAPVIET_SIGNING_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$MAPVIET_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+          export MAPVIET_SIGNING_KEY_FILE="$RUNNER_TEMP/key.pem"
+          export MAPVIET_NETWORK_VERSION="$(date -u +%Y.%m.%d.%H%M)"
+          echo "VERSION=$MAPVIET_NETWORK_VERSION" >> "$GITHUB_ENV"
+          python postprocess.py out release
+          rm -f "$RUNNER_TEMP/key.pem"
+
+      - name: Publish release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release
+          printf 'MapViet road network built from OpenStreetMap (ODbL, (c) OpenStreetMap contributors).\nosm_date: %s\n' "$OSM_DATE" > notes.txt
+          gh release create "network-$VERSION" --title "Network $VERSION" --notes-file notes.txt --latest \
+            manifest.txt manifest.txt.sig *.gz
+          # keep the 7 most recent releases
+          gh release list --limit 100 --json tagName -q '.[].tagName' | tail -n +8 | \
+            xargs -r -n1 gh release delete --yes --cleanup-tag

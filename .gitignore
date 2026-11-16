@@ -1,0 +1,7 @@
+*.pem
+*.key
+*.osm.pbf
+out/
+release/
+pipe_home/
+viethud/

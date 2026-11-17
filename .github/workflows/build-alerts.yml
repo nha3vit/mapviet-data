@@ -1,0 +1,102 @@
+# Builds the MapViet alert pack (cameras.bin + signs.bin) by merging VietHUD's signed
+# speedmap data with the VietMap point database (sources/vietmap/secrect.bin),
+# removing duplicates, and publishes it to the fixed release tag "alerts"
+# (never marked "latest", so the road-network URL releases/latest/download/ is untouched).
+# App URL: https://github.com/<owner>/mapviet-data/releases/download/alerts/manifest.txt
+# Required repo secret: MAPVIET_SIGNING_KEY (same key as build-network).
+name: build-alerts
+
+on:
+  schedule:
+    - cron: "0 2 * * *"      # 09:00 Vietnam time
+  push:
+    branches: [main]
+    paths:
+      - "sources/vietmap/**"
+      - "alerts.py"
+      - "vietmap_decode.py"
+      - ".github/workflows/build-alerts.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-alerts
+  cancel-in-progress: false
+
+env:
+  VIETHUD_SPEEDMAP: https://raw.githubusercontent.com/911273/VietHUD/main/speedmap
+  RELEASE_TAG: alerts
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Unit tests
+        run: python -m unittest test_alerts -v
+
+      - name: Download VietHUD speedmap alerts
+        run: |
+          mkdir -p vh
+          for f in manifest.txt manifest.txt.sig cameras.bin signs.bin; do
+            curl -fsSL --retry 3 -o "vh/$f" "$VIETHUD_SPEEDMAP/$f"
+          done
+
+      - name: Merge + de-duplicate + sign (verifies VietHUD signature first)
+        env:
+          MAPVIET_SIGNING_KEY: ${{ secrets.MAPVIET_SIGNING_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$MAPVIET_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+          export MAPVIET_SIGNING_KEY_FILE="$RUNNER_TEMP/key.pem"
+          export MAPVIET_ALERTS_VERSION="$(date -u +%Y.%m.%d.%H%M)"
+          python alerts.py --viethud vh --vietmap sources/vietmap/secrect.bin --out alerts_out
+          rm -f "$RUNNER_TEMP/key.pem"
+          test -s alerts_out/manifest.txt.sig
+          echo "CONTENT_SHA=$(python -c 'import json;print(json.load(open("alerts_out/stats.json"))["content_sha256"])')" >> "$GITHUB_ENV"
+
+      - name: Skip if content unchanged
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh release view "$RELEASE_TAG" --json body -q .body 2>/dev/null | grep '^content_sha256:' | cut -d' ' -f2 || true)
+          if [ "$last" = "$CONTENT_SHA" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Alert data unchanged ($CONTENT_SHA)"
+          fi
+
+      - name: Publish release "alerts"
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd alerts_out
+          python - <<'EOF' > notes.txt
+          import json
+          s = json.load(open("stats.json"))
+          print("MapViet alert pack: VietHUD speedmap + VietMap points, de-duplicated.")
+          print(f"version: {s['version']}")
+          print(f"viethud_version: {s['viethud_version']}")
+          print(f"vietmap_version: {s['vietmap_version']}")
+          print(f"cameras: {s['total_cameras']} (VietHUD {s['viethud_cameras']} + VietMap {s['added_cameras']})")
+          print(f"signs: {s['total_signs']} (VietHUD {s['viethud_signs']} + VietMap {s['added_signs']})")
+          print(f"content_sha256: {s['content_sha256']}")
+          EOF
+          cat notes.txt
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # Data files first, signed manifest last: a client never sees a new manifest with old files.
+            gh release upload "$RELEASE_TAG" cameras.bin signs.bin stats.json --clobber
+            gh release upload "$RELEASE_TAG" manifest.txt manifest.txt.sig --clobber
+            gh release edit "$RELEASE_TAG" --notes-file notes.txt --latest=false
+          else
+            gh release create "$RELEASE_TAG" --title "Alerts (VietHUD + VietMap)" --notes-file notes.txt \
+              --latest=false cameras.bin signs.bin stats.json manifest.txt manifest.txt.sig
+          fi

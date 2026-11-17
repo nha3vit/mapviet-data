@@ -67,6 +67,12 @@ jobs:
           python synthesize_and_pack.py --pbf "$GITHUB_WORKSPACE/vietnam.osm.pbf" \
             --out "$GITHUB_WORKSPACE/out" --region VN --custom-alerts "$GITHUB_WORKSPACE/pipe_home/empty"
 
+      - name: Tag urban segments
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          python urban_flags.py "$GITHUB_WORKSPACE/vietnam.osm.pbf" "$GITHUB_WORKSPACE/out" | tee urban.log
+          echo "URBAN_COUNT=$(grep 'Total urban segments:' urban.log | awk '{print $NF}')" >> "$GITHUB_ENV"
+
       - name: Package + sign
         if: steps.check.outputs.skip != 'true'
         env:
@@ -86,7 +92,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd release
-          printf 'MapViet road network built from OpenStreetMap (ODbL, (c) OpenStreetMap contributors).\nosm_date: %s\n' "$OSM_DATE" > notes.txt
+          printf 'MapViet road network built from OpenStreetMap (ODbL, (c) OpenStreetMap contributors).\nosm_date: %s\nurban_segments: %s\n' "$OSM_DATE" "$URBAN_COUNT" > notes.txt
           gh release create "network-$VERSION" --title "Network $VERSION" --notes-file notes.txt --latest \
             manifest.txt manifest.txt.sig *.gz
           # keep the 7 most recent releases

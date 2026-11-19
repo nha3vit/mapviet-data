@@ -1,7 +1,7 @@
 # Builds the MapViet alert pack (cameras.bin + signs.bin) by merging VietHUD's signed
-# speedmap data with the VietMap point database (sources/vietmap/secrect.bin),
-# removing duplicates, and publishes it to the fixed release tag "alerts"
-# (never marked "latest", so the road-network URL releases/latest/download/ is untouched).
+# speedmap data with the VietMap point database (sources/vietmap/secrect.bin) and WYN points
+# (sources/wyn/wyn_points.csv), removing duplicates (R4 standard), and publishes it to the
+# fixed release tag "alerts" (never marked "latest", so the road-network URL releases/latest/download/ is untouched).
 # App URL: https://github.com/<owner>/mapviet-data/releases/download/alerts/manifest.txt
 # Required repo secret: MAPVIET_SIGNING_KEY (same key as build-network).
 name: build-alerts
@@ -13,8 +13,14 @@ on:
     branches: [main]
     paths:
       - "sources/vietmap/**"
+      - "sources/wyn/**"
       - "alerts.py"
       - "vietmap_decode.py"
+      - "sign_manifest.py"
+      - "validate_speedmap.py"
+      - "validate_alerts.py"
+      - "verify_viethud.py"
+      - "tests/**"
       - ".github/workflows/build-alerts.yml"
   workflow_dispatch: {}
 
@@ -40,8 +46,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: |
+          pip install cryptography==50.0.1
+
       - name: Unit tests
-        run: python -m unittest test_alerts -v
+        run: |
+          python -m unittest discover -s tests -v
+          python -m unittest test_postprocess test_urban_flags -v
 
       - name: Download VietHUD speedmap alerts
         run: |
@@ -50,7 +62,11 @@ jobs:
             curl -fsSL --retry 3 -o "vh/$f" "$VIETHUD_SPEEDMAP/$f"
           done
 
-      - name: Merge + de-duplicate + sign (verifies VietHUD signature first)
+      - name: Verify VietHUD speedmap signature & integrity
+        run: |
+          python verify_viethud.py vh
+
+      - name: Merge + de-duplicate + sign
         env:
           MAPVIET_SIGNING_KEY: ${{ secrets.MAPVIET_SIGNING_KEY }}
         run: |
@@ -58,10 +74,15 @@ jobs:
           printf '%s\n' "$MAPVIET_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
           export MAPVIET_SIGNING_KEY_FILE="$RUNNER_TEMP/key.pem"
           export MAPVIET_ALERTS_VERSION="$(date -u +%Y.%m.%d.%H%M)"
-          python alerts.py --viethud vh --vietmap sources/vietmap/secrect.bin --out alerts_out
+          python alerts.py --base vh --vietmap sources/vietmap/secrect.bin --wyn sources/wyn/wyn_points.csv --out alerts_out --version "$MAPVIET_ALERTS_VERSION"
           rm -f "$RUNNER_TEMP/key.pem"
           test -s alerts_out/manifest.txt.sig
           echo "CONTENT_SHA=$(python -c 'import json;print(json.load(open("alerts_out/stats.json"))["content_sha256"])')" >> "$GITHUB_ENV"
+
+      - name: Validate alert pack
+        run: |
+          python validate_speedmap.py alerts_out --alerts-only
+          python validate_alerts.py alerts_out --vietmap sources/vietmap/secrect.bin
 
       - name: Skip if content unchanged
         id: check
@@ -82,12 +103,21 @@ jobs:
           python - <<'EOF' > notes.txt
           import json
           s = json.load(open("stats.json"))
-          print("MapViet alert pack: VietHUD speedmap + VietMap points, de-duplicated.")
-          print(f"version: {s['version']}")
-          print(f"viethud_version: {s['viethud_version']}")
-          print(f"vietmap_version: {s['vietmap_version']}")
-          print(f"cameras: {s['total_cameras']} (VietHUD {s['viethud_cameras']} + VietMap {s['added_cameras']})")
-          print(f"signs: {s['total_signs']} (VietHUD {s['viethud_signs']} + VietMap {s['added_signs']})")
+          vm_k = s.get("deduplication_stats", {}).get("vietmap_kept", s.get("vietmap_out", 0))
+          wyn_k = s.get("deduplication_stats", {}).get("wyn_kept", 0)
+          base_k = s.get("deduplication_stats", {}).get("base_kept", 0)
+          src_counts = s.get("counts_by_source_and_type", {})
+          vm_cams = src_counts.get("VietMap", {}).get("camera", 0)
+          wyn_cams = src_counts.get("WYN", {}).get("camera", 0)
+          base_cams = src_counts.get("Base", {}).get("camera", 0)
+
+          print("MapViet alert pack: VietHUD speedmap + VietMap + WYN points, de-duplicated (Chuẩn R4).")
+          print(f"version: {s.get('version', '')}")
+          print(f"vietmap_version: {s.get('vietmap_version', '')}")
+          print(f"total_points: {s.get('total_points', 0)} (VietMap {vm_k:,} + WYN {wyn_k:,} + Base {base_k:,})")
+          print(f"cameras: {s.get('cameras_count', 0)} (VietMap {vm_cams:,} + WYN {wyn_cams:,} + Base {base_cams:,})")
+          print(f"signs: {s.get('signs_count', 0)}")
+          print("Dữ liệu VietMap © VietMap; dữ liệu WYN — cảm ơn WYN.")
           print(f"content_sha256: {s['content_sha256']}")
           EOF
           cat notes.txt
@@ -97,6 +127,6 @@ jobs:
             gh release upload "$RELEASE_TAG" manifest.txt manifest.txt.sig --clobber
             gh release edit "$RELEASE_TAG" --notes-file notes.txt --latest=false
           else
-            gh release create "$RELEASE_TAG" --title "Alerts (VietHUD + VietMap)" --notes-file notes.txt \
+            gh release create "$RELEASE_TAG" --title "Alerts (VietHUD + VietMap + WYN)" --notes-file notes.txt \
               --latest=false cameras.bin signs.bin stats.json manifest.txt manifest.txt.sig
           fi

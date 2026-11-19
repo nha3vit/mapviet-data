@@ -27,7 +27,7 @@ class DecodeTest(unittest.TestCase):
             "105.8,21.0,1,50,1,90",
             "105.8,21.0,1,50,1,90",          # exact duplicate
             "120.0,21.0,1,50,1,90",          # outside Vietnam
-            "105.8,21.0,7,0,1,90",           # unknown type
+            "105.8,21.0,99,0,1,90",         # unknown type
             "105.8,21.0,1",                  # bad fields
             "105.9,21.1,11,0,1,359",
         ])
@@ -37,6 +37,20 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual([(p.type, p.speed_limit, p.heading) for p in res.points], [(1, 50, 90), (11, 0, 359)])
         self.assertEqual(res.skipped, {"undecodable": 1, "bad_fields": 1, "out_of_bounds": 1,
                                        "unknown_type": 1, "duplicate": 1})
+
+    def test_container_format_edogen_extraction(self):
+        edogen_text = "261022\r\n105.8,21.0,1,50,1,90\r\n106.0,20.0,7,0,1,180\r\n"
+        edogen_bytes = vm.encode_text(edogen_text)
+        edogen_size = len(edogen_bytes)
+        hdr = bytearray(512)
+        hdr[0:10] = b"edogen.bin"
+        struct.pack_into("<I", hdr, 64, edogen_size)
+        container = bytes(hdr) + edogen_bytes + b"\xff" * 500
+        res = vm.decode_bytes(container)
+        self.assertEqual(res.version, "261022")
+        self.assertEqual(len(res.points), 2)
+        self.assertEqual(res.points[0].type, 1)
+        self.assertEqual(res.points[1].type, 7)
 
     def test_real_substitution_table(self):
         # First data row of the real file (bytes copied from secrect.bin).
@@ -98,6 +112,32 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(a[0], b[0])
         self.assertEqual(a[1], b[1])
 
+    def test_all_vietmap_types_mapping(self):
+        pts = [
+            self.point(vm.TYPE_SPEED_LIMIT, 21.01, 105.01, 90, 60),      # sign 1
+            self.point(vm.TYPE_TRAFFIC_LIGHT, 21.02, 105.02, 90),        # sign 6
+            self.point(vm.TYPE_VM_LIGHT_3, 21.03, 105.03, 90),           # sign 6
+            self.point(vm.TYPE_URBAN_START, 21.04, 105.04, 90),          # sign 2, subType 0
+            self.point(vm.TYPE_TOLL_BOOTH, 21.05, 105.05, 90),           # sign 5
+            self.point(vm.TYPE_VM_LIGHT_6, 21.06, 105.06, 90),           # sign 6
+            self.point(vm.TYPE_VM_DANGER_7, 21.07, 105.07, 90),          # sign 10, subType 0
+            self.point(vm.TYPE_VM_TYPE_8, 21.08, 105.08, 0),             # sign 10, subType 8, omni
+            self.point(vm.TYPE_VM_TYPE_9, 21.09, 105.09, 45),            # sign 10, subType 9
+            self.point(vm.TYPE_NO_OVERTAKING, 21.10, 105.10, 90),        # sign 3
+            self.point(vm.TYPE_CAMERA, 21.11, 105.11, 90),               # camera
+        ]
+        cams, signs, s = alerts.merge([], [], pts)
+        self.assertEqual(len(cams), 1)
+        self.assertEqual(len(signs), 10)
+        # Check type 8 has DIR_ANY (0xFFFF) and subType 8
+        s8 = [s for s in signs if s[6] == 8][0]
+        self.assertEqual(s8[3], alerts.DIR_ANY)
+        self.assertEqual(s8[4], alerts.SIGN_DANGER)
+        # Check type 9 has heading 45 and subType 9
+        s9 = [s for s in signs if s[6] == 9][0]
+        self.assertEqual(s9[3], 45)
+        self.assertEqual(s9[4], alerts.SIGN_DANGER)
+
 
 class EndToEndTest(unittest.TestCase):
     def test_main_writes_valid_files(self):
@@ -117,10 +157,12 @@ class EndToEndTest(unittest.TestCase):
             cams = alerts.read_cameras(os.path.join(out, "cameras.bin"))
             ver, ts, signs = alerts.read_signs(os.path.join(out, "signs.bin"))
             self.assertEqual((len(cams), len(signs), ver, ts), (2, 1, 1, 1234))
-            manifest = open(os.path.join(out, "manifest.txt")).read().splitlines()
+            with open(os.path.join(out, "manifest.txt")) as f:
+                manifest = f.read().splitlines()
             self.assertEqual(manifest[0], "version 2026.01.01.0000")
             self.assertEqual([l.split()[0] for l in manifest[1:]], ["cameras.bin", "signs.bin"])
-            body = open(os.path.join(out, "signs.bin"), "rb").read()
+            with open(os.path.join(out, "signs.bin"), "rb") as f:
+                body = f.read()
             self.assertEqual(struct.unpack_from("<I", body, 12)[0], zlib.crc32(body[20:]) & 0xFFFFFFFF)
 
 

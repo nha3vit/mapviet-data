@@ -5,7 +5,7 @@ Usage:
     python3 alerts.py --viethud <dir> --vietmap <secrect.bin> --out <dir> [--skip-verify]
 
 <viethud dir> must contain VietHUD ``manifest.txt``, ``manifest.txt.sig``, ``cameras.bin``
-and ``signs.bin`` (from github.com/911273/VietHUD/tree/main/speedmap). The manifest
+and ``signs.bin`` (from github.com/nha3vit/VietHUD/tree/main/speedmap). The manifest
 signature (VietHUD public key) and the size/sha256 of both files are checked first.
 
 Output (<out>): ``cameras.bin`` ``signs.bin`` (same binary formats as VietHUD, so the
@@ -53,13 +53,19 @@ SIGN_HEADING_TOL = 45
 CAMERA_HEADING_TOL = 60
 SOURCE_VIETMAP = 1
 
-SIGN_SPEED, SIGN_URBAN, SIGN_NO_OVERTAKING, SIGN_LIGHT = 1, 2, 3, 6
+SIGN_SPEED, SIGN_URBAN, SIGN_NO_OVERTAKING, SIGN_TOLL, SIGN_LIGHT, SIGN_DANGER = 1, 2, 3, 5, 6, 10
 VIETMAP_TO_KIND = {
-    vm.TYPE_SPEED_LIMIT: ("sign", SIGN_SPEED),
-    vm.TYPE_TRAFFIC_LIGHT: ("sign", SIGN_LIGHT),
-    vm.TYPE_URBAN_START: ("sign", SIGN_URBAN),
-    vm.TYPE_NO_OVERTAKING: ("sign", SIGN_NO_OVERTAKING),
-    vm.TYPE_CAMERA: ("camera", None),
+    vm.TYPE_SPEED_LIMIT:   ("sign", SIGN_SPEED, 0),
+    vm.TYPE_TRAFFIC_LIGHT: ("sign", SIGN_LIGHT, 0),
+    vm.TYPE_VM_LIGHT_3:    ("sign", SIGN_LIGHT, 0),
+    vm.TYPE_URBAN_START:   ("sign", SIGN_URBAN, 0),
+    vm.TYPE_TOLL_BOOTH:    ("sign", SIGN_TOLL, 0),
+    vm.TYPE_VM_LIGHT_6:    ("sign", SIGN_LIGHT, 0),
+    vm.TYPE_VM_DANGER_7:   ("sign", SIGN_DANGER, 0),
+    vm.TYPE_VM_TYPE_8:     ("sign", SIGN_DANGER, 8),
+    vm.TYPE_VM_TYPE_9:     ("sign", SIGN_DANGER, 9),
+    vm.TYPE_NO_OVERTAKING: ("sign", SIGN_NO_OVERTAKING, 0),
+    vm.TYPE_CAMERA:        ("camera", None, 0),
 }
 
 # VietHUD manifest signing key (firmware src/update/DataInstaller.cpp).
@@ -114,14 +120,16 @@ def verify_viethud(src_dir):
 
 
 def read_cameras(path):
-    data = open(path, "rb").read()
+    with open(path, "rb") as f:
+        data = f.read()
     if len(data) % CAMERA_SIZE:
         raise SystemExit("cameras.bin: size is not a multiple of 20")
     return [struct.unpack_from(CAMERA_FMT, data, o) for o in range(0, len(data), CAMERA_SIZE)]
 
 
 def read_signs(path):
-    data = open(path, "rb").read()
+    with open(path, "rb") as f:
+        data = f.read()
     magic, ver, count, _res, crc, ts = struct.unpack_from(SIGN_HEADER_FMT, data, 0)
     if magic != b"VNSG":
         raise SystemExit("signs.bin: bad magic")
@@ -194,11 +202,12 @@ def merge(vh_cameras, vh_signs, vm_points):
     stats = collections.defaultdict(lambda: collections.Counter())
 
     for p in vm_points:
-        group, sign_type = VIETMAP_TO_KIND[p.type]
+        group, sign_type, sub_type = VIETMAP_TO_KIND[p.type]
         kind = "camera" if group == "camera" else ("sign", sign_type)
         tol = CAMERA_HEADING_TOL if group == "camera" else SIGN_HEADING_TOL
         label = f"vietmap_type_{p.type}"
-        hit = index.find(kind, p.lat, p.lon, p.heading, MERGE_RADIUS_M, tol)
+        hd = DIR_ANY if p.type == vm.TYPE_VM_TYPE_8 else (p.heading if heading_known(p.heading) else DIR_ANY)
+        hit = index.find(kind, p.lat, p.lon, hd, MERGE_RADIUS_M, tol)
         if hit is not None:
             src, rec = hit[1][3]
             stats[label]["duplicate_of_" + src] += 1
@@ -207,16 +216,16 @@ def merge(vh_cameras, vh_signs, vm_points):
             continue
         lat_e7, lon_e7 = round(p.lat * 1e7), round(p.lon * 1e7)
         if group == "camera":
-            cid = stable_id("cam", p.type, lat_e7, lon_e7, p.heading, cam_ids, 1 << 62, (1 << 62) - 1)
+            cid = stable_id("cam", p.type, lat_e7, lon_e7, hd, cam_ids, 1 << 62, (1 << 62) - 1)
             speed = p.speed_limit if p.speed_limit > 0 else -1
-            rec = (cid, lat_e7, lon_e7, speed, p.heading)
+            rec = (cid, lat_e7, lon_e7, speed, hd)
             new_cameras.append(rec)
         else:
-            sid = stable_id("sign", p.type, lat_e7, lon_e7, p.heading, sign_ids, 0x80000000, 0x7FFFFFFF)
+            sid = stable_id("sign", p.type, lat_e7, lon_e7, hd, sign_ids, 0x80000000, 0x7FFFFFFF)
             speed = p.speed_limit if sign_type == SIGN_SPEED else 0
-            rec = (sid, lat_e7, lon_e7, p.heading, sign_type, speed, 0, 0, SOURCE_VIETMAP)
+            rec = (sid, lat_e7, lon_e7, hd, sign_type, speed, sub_type, 0, SOURCE_VIETMAP)
             new_signs.append(rec)
-        index.add(kind, p.lat, p.lon, p.heading, ("vm", rec))
+        index.add(kind, p.lat, p.lon, hd, ("vm", rec))
         stats[label]["added"] += 1
 
     summary = {

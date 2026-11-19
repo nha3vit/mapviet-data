@@ -18,6 +18,7 @@ VietMap ``type`` (meaning established by matching positions with VietHUD):
 
 Usage: ``python3 vietmap_decode.py secrect.bin [out.csv]``
 """
+import struct
 import sys
 from dataclasses import dataclass
 
@@ -28,16 +29,28 @@ SUBSTITUTION = {
 }
 ENCODE = {v: k for k, v in SUBSTITUTION.items()}
 
-TYPE_SPEED_LIMIT = 1
-TYPE_TRAFFIC_LIGHT = 2
-TYPE_URBAN_START = 4
-TYPE_NO_OVERTAKING = 10
-TYPE_CAMERA = 11
-KNOWN_TYPES = {TYPE_SPEED_LIMIT, TYPE_TRAFFIC_LIGHT, TYPE_URBAN_START, TYPE_NO_OVERTAKING, TYPE_CAMERA}
+TYPE_SPEED_LIMIT    = 1
+TYPE_TRAFFIC_LIGHT  = 2
+TYPE_VM_LIGHT_3     = 3
+TYPE_URBAN_START    = 4
+TYPE_TOLL_BOOTH     = 5
+TYPE_VM_LIGHT_6     = 6
+TYPE_VM_DANGER_7    = 7
+TYPE_VM_TYPE_8      = 8
+TYPE_VM_TYPE_9      = 9
+TYPE_NO_OVERTAKING  = 10
+TYPE_CAMERA         = 11
+
+KNOWN_TYPES = {
+    TYPE_SPEED_LIMIT, TYPE_TRAFFIC_LIGHT, TYPE_VM_LIGHT_3,
+    TYPE_URBAN_START, TYPE_TOLL_BOOTH, TYPE_VM_LIGHT_6,
+    TYPE_VM_DANGER_7, TYPE_VM_TYPE_8, TYPE_VM_TYPE_9,
+    TYPE_NO_OVERTAKING, TYPE_CAMERA
+}
 
 # Vietnam bounding box (generous) used to reject corrupt rows.
-LAT_MIN, LAT_MAX = 8.0, 23.6
-LON_MIN, LON_MAX = 102.0, 110.0
+LAT_MIN, LAT_MAX = 8.0, 24.0
+LON_MIN, LON_MAX = 102.0, 110.5
 
 
 @dataclass(frozen=True)
@@ -61,22 +74,46 @@ def encode_text(text):
     return bytes(ENCODE[c] for c in text)
 
 
+def extract_edogen_bytes(data: bytes) -> bytes:
+    """Extract edogen.bin slice from secrect.bin container header (512 bytes)."""
+    if data.startswith(b"secrect.bin") or b"edogen.bin" in data[:512]:
+        toc: dict[str, int] = {}
+        for i in range(0, min(len(data), 512), 68):
+            chunk = data[i : i + 68]
+            if len(chunk) < 68:
+                break
+            name = chunk[:64].rstrip(b"\x00").decode("latin1", errors="ignore").strip()
+            if name:
+                size = struct.unpack("<I", chunk[64:68])[0]
+                toc[name] = size
+
+        edogen_size = toc.get("edogen.bin", 2684000)
+        return data[512 : 512 + edogen_size]
+    return data
+
+
 def decode_bytes(data):
-    lines = data.split(b"\x83\x71")
+    raw_data = extract_edogen_bytes(data)
+    lines = raw_data.split(b"\x83\x71")
     skipped = {"undecodable": 0, "bad_fields": 0, "out_of_bounds": 0, "unknown_type": 0, "duplicate": 0}
     decoded = []
+    version = "Unknown"
     for raw in lines:
         if not raw:
             continue
+        if version == "Unknown" and 0xA3 not in raw:
+            candidate = "".join(SUBSTITUTION[b] for b in raw if b in SUBSTITUTION).strip()
+            if len(candidate) in (6, 8) and candidate.isdigit():
+                version = candidate
+                continue
         if any(b not in SUBSTITUTION for b in raw):
             decoded.append(None)
         else:
             decoded.append("".join(SUBSTITUTION[b] for b in raw))
-    if not decoded or decoded[0] is None:
-        raise ValueError("secrect.bin: cannot decode header line")
-    version = decoded[0]
+    if not decoded:
+        raise ValueError("secrect.bin: cannot decode lines")
     points, seen = [], set()
-    for text in decoded[1:]:
+    for text in decoded:
         if text is None:
             skipped["undecodable"] += 1
             continue

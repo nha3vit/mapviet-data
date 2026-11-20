@@ -9,13 +9,18 @@ Bản chất file secrect.bin:
   - Phân vùng edogen.bin: Dữ liệu cảnh báo dạng text được mã hóa bằng bảng thế 1-byte cố định (Substitution Cipher)
   - Phân cách dòng bằng cụm byte: b'\\x83\\x71' (\\r\\n)
 
-Bảng phân loại VietMap type:
-  1  : Biển báo / Giới hạn tốc độ (speed_limit = km/h)
-  2  : Đèn tín hiệu giao thông / Ngã tư
-  4  : Bắt đầu khu đông dân cư (Urban zone start)
-  5  : Trạm thu phí BOT
-  10 : Đoạn đường cấm vượt (No overtaking)
-  11 : Camera giám sát giao thông / Phạt nguội
+Bảng phân loại VietMap type (xem chi tiết và bằng chứng tại docs/DATA_STANDARD.md và AGY_TASK_R5B_PENDING_TYPES.md):
+  1  : Biển giới hạn tốc độ (speed_limit = km/h) (đã kiểm chứng)
+  2  : R.420 vào khu đông dân cư (đã kiểm chứng)
+  3  : R.421 hết khu đông dân cư (đã kiểm chứng)
+  4  : Đèn tín hiệu giao thông / nút giao có đèn (độ tin cậy cao - kiểm chứng OSM)
+  5  : Bắt đầu đoạn cấm vượt (độ tin cậy trung bình)
+  6  : Hết đoạn cấm vượt (độ tin cậy trung bình)
+  7  : Cảnh báo khác "Chú ý" (độ tin cậy thấp - app: "Chú ý đoạn đường phía trước")
+  8  : Trạm thu phí (đã kiểm chứng)
+  9  : Hầm đường bộ (đã kiểm chứng)
+  10 : Cảnh báo khác (độ tin cậy thấp - app: chỉ vẽ, không đọc)
+  11 : Camera giám sát giao thông / phạt nguội (đã kiểm chứng)
 
 Định dạng dòng sau giải mã:
   lon,lat,type,speed_limit,flag,heading
@@ -41,23 +46,39 @@ SUBSTITUTION = {
 # Reverse lookup dictionary (char -> byte) for testing and encoding
 REVERSE_SUBSTITUTION = {v: k for k, v in SUBSTITUTION.items()}
 
-TYPE_SPEED_LIMIT    = 1
-TYPE_TRAFFIC_LIGHT  = 2
-TYPE_VM_LIGHT_3     = 3
-TYPE_URBAN_START    = 4
-TYPE_TOLL_BOOTH     = 5
-TYPE_VM_LIGHT_6     = 6
-TYPE_VM_DANGER_7    = 7
-TYPE_VM_TYPE_8      = 8
-TYPE_VM_TYPE_9      = 9
-TYPE_NO_OVERTAKING  = 10
-TYPE_CAMERA         = 11
+TYPE_SPEED_LIMIT          = 1
+TYPE_RESIDENT_ENTER        = 2      # R.420 vào khu đông dân cư   (đã kiểm chứng)
+TYPE_RESIDENT_EXIT         = 3      # R.421 hết khu đông dân cư   (đã kiểm chứng)
+TYPE_SIGNAL                = 4      # Đèn tín hiệu / nút giao có đèn (độ tin cậy cao)
+TYPE_NO_OVERTAKING_START   = 5      # Bắt đầu đoạn cấm vượt       (độ tin cậy trung bình)
+TYPE_NO_OVERTAKING_END     = 6      # Hết đoạn cấm vượt           (độ tin cậy trung bình)
+TYPE_UNCLEAR_7             = 7      # Cảnh báo khác "Chú ý"       (độ tin cậy thấp)
+TYPE_TOLL                  = 8      # Trạm thu phí                (đã kiểm chứng)
+TYPE_TUNNEL                = 9      # Hầm đường bộ                (đã kiểm chứng)
+TYPE_UNCLEAR_10            = 10     # Cảnh báo khác chỉ vẽ        (độ tin cậy thấp)
+TYPE_CAMERA                = 11     # Camera phạt nguội           (đã kiểm chứng)
+
+# Alias R5A và cũ để tương thích ngược tuyệt đối
+TYPE_PENDING_4             = TYPE_SIGNAL
+TYPE_PENDING_5             = TYPE_NO_OVERTAKING_START
+TYPE_PENDING_6             = TYPE_NO_OVERTAKING_END
+TYPE_PENDING_7             = TYPE_UNCLEAR_7
+TYPE_PENDING_10            = TYPE_UNCLEAR_10
+TYPE_TRAFFIC_LIGHT         = TYPE_RESIDENT_ENTER
+TYPE_VM_LIGHT_3            = TYPE_RESIDENT_EXIT
+TYPE_URBAN_START           = TYPE_SIGNAL
+TYPE_TOLL_BOOTH            = TYPE_NO_OVERTAKING_START
+TYPE_VM_LIGHT_6            = TYPE_NO_OVERTAKING_END
+TYPE_VM_DANGER_7           = TYPE_UNCLEAR_7
+TYPE_VM_TYPE_8             = TYPE_TOLL
+TYPE_VM_TYPE_9             = TYPE_TUNNEL
+TYPE_NO_OVERTAKING         = TYPE_UNCLEAR_10
 
 KNOWN_TYPES = {
-    TYPE_SPEED_LIMIT, TYPE_TRAFFIC_LIGHT, TYPE_VM_LIGHT_3,
-    TYPE_URBAN_START, TYPE_TOLL_BOOTH, TYPE_VM_LIGHT_6,
-    TYPE_VM_DANGER_7, TYPE_VM_TYPE_8, TYPE_VM_TYPE_9,
-    TYPE_NO_OVERTAKING, TYPE_CAMERA
+    TYPE_SPEED_LIMIT, TYPE_RESIDENT_ENTER, TYPE_RESIDENT_EXIT,
+    TYPE_SIGNAL, TYPE_NO_OVERTAKING_START, TYPE_NO_OVERTAKING_END,
+    TYPE_UNCLEAR_7, TYPE_TOLL, TYPE_TUNNEL,
+    TYPE_UNCLEAR_10, TYPE_CAMERA
 }
 
 # Tọa độ bounding box Việt Nam để lọc nhiễu

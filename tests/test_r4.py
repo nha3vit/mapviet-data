@@ -59,8 +59,8 @@ class TestR4Standardization(unittest.TestCase):
 
     def test_vietmap_type_8_and_9_mapping(self):
         """
-        Bước 6 & R4-FIX:
-        VietMap loại 8 -> có trong signs: type 10 (DANGER_OTHER), sub_type 8, hướng 0 -> 0xFFFF.
+        Bước 6 & R4-FIX (cập nhật chuẩn R5a):
+        VietMap loại 8 -> có trong signs: type 5 (TOLL_BOOTH), sub_type 0, hướng 0 -> 0xFFFF.
         VietMap loại 9 -> có trong signs: type 10 (DANGER_OTHER), sub_type 9, giữ hướng.
         """
         vm_bin = self.td / "secrect.bin"
@@ -74,9 +74,9 @@ class TestR4Standardization(unittest.TestCase):
         pts, _ = alerts.load_vietmap_alerts(vm_bin)
         self.assertEqual(len(pts), 2)
 
-        p8 = [p for p in pts if p.sub_type == 8][0]
-        self.assertEqual(p8.sign_type, alerts.SIGN_TYPE_DANGER_OTHER)
-        self.assertEqual(p8.sub_type, 8)
+        p8 = [p for p in pts if p.sign_type == alerts.SIGN_TYPE_TOLL_BOOTH][0]
+        self.assertEqual(p8.sign_type, alerts.SIGN_TYPE_TOLL_BOOTH)
+        self.assertEqual(p8.sub_type, 0)
         self.assertEqual(p8.speed_limit, 0)
         self.assertEqual(p8.heading, alerts.DIR_OMNI, "VietMap loại 8 hướng 0 -> 0xFFFF theo F1")
         self.assertFalse(p8.is_camera)
@@ -293,7 +293,8 @@ class TestR4Standardization(unittest.TestCase):
         pts, _ = alerts.load_vietmap_alerts(vm_bin)
         self.assertEqual(len(pts), 1)
         self.assertEqual(pts[0].heading, alerts.DIR_OMNI, "VietMap loại 8 hướng 0 phải chuyển thành 0xFFFF")
-        self.assertEqual(pts[0].sub_type, 8)
+        self.assertEqual(pts[0].sign_type, alerts.SIGN_TYPE_TOLL_BOOTH)
+        self.assertEqual(pts[0].sub_type, 0)
 
     def test_r4_fix_vietmap_heading_hard_check_fails_on_tamper(self):
         """

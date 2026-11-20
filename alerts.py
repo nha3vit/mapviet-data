@@ -9,12 +9,17 @@ Nguồn dữ liệu & Thứ tự ưu tiên (Priority):
   2. WYN (P2 - Ưu tiên cao): Từ file data/wyn/wyn_points.csv đã được đóng băng
   3. Dữ liệu nền Base (P3 - Cơ sở): Từ cameras.bin và signs.bin do synthesize_and_pack.py sinh
 
-Quy tắc ánh xạ VietMap -> VietHUD:
-  - Type 1  -> Sign 1 (SPEED_LIMIT), speed 5..130 (ngoài dải bỏ điểm)
-  - Type 2  -> Sign 6 (TRAFFIC_LIGHT), speed 0
-  - Type 4  -> Sign 2 (RESIDENT_AREA), subType 0, speed 0
-  - Type 5  -> Sign 5 (TOLL_BOOTH), speed 0
-  - Type 10 -> Sign 3 (NO_OVERTAKING), speed 0
+Quy tắc ánh xạ VietMap -> VietHUD (Chuẩn R5b):
+  - Type 1  -> Sign 1 (SPEED_LIMIT), subType 0, speed 5..130 (km/h gốc)
+  - Type 2  -> Sign 2 (RESIDENT_AREA), subType 0 (vào KDC), speed 0
+  - Type 3  -> Sign 2 (RESIDENT_AREA), subType 1 (hết KDC), speed 0
+  - Type 4  -> Sign 6 (TRAFFIC_LIGHT), subType 0 (đèn / nút giao có đèn), speed 0
+  - Type 5  -> Sign 3 (NO_OVERTAKING), subType 0 (bắt đầu cấm vượt), speed 0
+  - Type 6  -> Sign 3 (NO_OVERTAKING), subType 1 (hết cấm vượt), speed 0
+  - Type 7  -> Sign 10 (DANGER_OTHER), subType 7 ("Chú ý đoạn đường phía trước"), speed 0
+  - Type 8  -> Sign 5 (TOLL_BOOTH), subType 0, speed 0, heading 0xFFFF
+  - Type 9  -> Sign 10 (DANGER_OTHER), subType 9 (hầm), speed 0
+  - Type 10 -> Sign 10 (DANGER_OTHER), subType 10 (cảnh báo khác, chỉ vẽ, không đọc), speed 0
   - Type 11 -> Camera (phạt nguội), speed 0
 
 CHỈ VietMap type 11, camera WYN (kind=camera) và camera trong base/cameras.bin được ghi vào cameras.bin.
@@ -57,6 +62,9 @@ SIGN_TYPE_NO_OVERTAKING  = 3
 SIGN_TYPE_TOLL_BOOTH     = 5
 SIGN_TYPE_TRAFFIC_LIGHT  = 6
 SIGN_TYPE_DANGER_OTHER   = 10
+
+# Bảng ánh xạ các loại biển cũ bị gán sai trong VietHUD nền và WYN (Chuẩn R5a)
+STALE_OLD_MAP = {2: {6}, 3: {6}, 4: {2}, 5: {5}, 6: {6}, 7: {10}, 8: {10}, 9: {10}, 10: {3}}
 
 # Bán kính khử trùng lặp chuẩn R3
 RADIUS_CAMERA_M          = 30.0  # Camera
@@ -143,6 +151,15 @@ def is_heading_known(h: int, source: str | None = None) -> bool:
     return 0 < h < 360
 
 
+def is_in_core_urban_4cities(lat: float, lon: float) -> bool:
+    """Kiểm tra toạ độ có nằm trong lõi nội đô 4 thành phố (Hà Nội, TP.HCM, Đà Nẵng, Hải Phòng) hay không."""
+    hn = (20.99 <= lat <= 21.06) and (105.80 <= lon <= 105.87)
+    hcm = (10.75 <= lat <= 10.81) and (106.66 <= lon <= 106.72)
+    dn = (16.03 <= lat <= 16.09) and (108.19 <= lon <= 108.25)
+    hp = (20.84 <= lat <= 20.88) and (106.66 <= lon <= 106.72)
+    return hn or hcm or dn or hp
+
+
 @dataclass
 class AlertPoint:
     lat: float
@@ -214,7 +231,7 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
         if not (LAT_MIN <= p.lat <= LAT_MAX and LON_MIN <= p.lon <= LON_MAX):
             continue
 
-        if p.type == vmd.TYPE_VM_TYPE_8:
+        if p.type == vmd.TYPE_TOLL:
             # Ngoại lệ F1: loại 8 (634/634 điểm hướng 0, rõ ràng không có hướng) -> DIR_OMNI (0xFFFF)
             hd = DIR_OMNI
             GLOBAL_DROP_STATS["vietmap_type8_heading_zero_as_unknown"] += 1
@@ -238,11 +255,46 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 priority=PRIORITY_VIETMAP,
                 desc=f"VietMap Speed Limit ({p.speed_limit}km/h)",
                 kind="sign",
+                sub_type=0,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
-        elif p.type in (vmd.TYPE_TRAFFIC_LIGHT, vmd.TYPE_VM_LIGHT_3, vmd.TYPE_VM_LIGHT_6):
-            # Type 2, 3, 6: Sign 6 TRAFFIC_LIGHT, speed = 0 (Bước 3b)
+        elif p.type == vmd.TYPE_RESIDENT_ENTER:
+            # Type 2: Sign 2 RESIDENT_AREA, subType 0 (bắt đầu), speed = 0 (R.420)
+            pt = AlertPoint(
+                lat=p.lat,
+                lon=p.lon,
+                sign_type=SIGN_TYPE_RESIDENT_AREA,
+                speed_limit=0,
+                heading=hd,
+                is_camera=False,
+                source="VietMap",
+                priority=PRIORITY_VIETMAP,
+                desc="VietMap Resident Area Enter (R.420)",
+                kind="sign",
+                sub_type=0,
+                original_type=p.type,
+                decoded_heading=p.heading,
+            )
+        elif p.type == vmd.TYPE_RESIDENT_EXIT:
+            # Type 3: Sign 2 RESIDENT_AREA, subType 1 (hết), speed = 0 (R.421)
+            pt = AlertPoint(
+                lat=p.lat,
+                lon=p.lon,
+                sign_type=SIGN_TYPE_RESIDENT_AREA,
+                speed_limit=0,
+                heading=hd,
+                is_camera=False,
+                source="VietMap",
+                priority=PRIORITY_VIETMAP,
+                desc="VietMap Resident Area Exit (R.421)",
+                kind="sign",
+                sub_type=1,
+                original_type=p.type,
+                decoded_heading=p.heading,
+            )
+        elif p.type == vmd.TYPE_SIGNAL:
+            # Type 4: Sign 6 TRAFFIC_LIGHT, subType 0 (đèn/nút giao có đèn), speed = 0
             pt = AlertPoint(
                 lat=p.lat,
                 lon=p.lon,
@@ -254,28 +306,80 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 priority=PRIORITY_VIETMAP,
                 desc="VietMap Traffic Light",
                 kind="light",
+                sub_type=0,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
-        elif p.type == vmd.TYPE_URBAN_START:
-            # Type 4: Sign 2 RESIDENT_AREA, subType 0, speed = 0
+        elif p.type == vmd.TYPE_NO_OVERTAKING_START:
+            # Type 5: Sign 3 NO_OVERTAKING, subType 0 (bắt đầu cấm vượt), speed = 0
             pt = AlertPoint(
                 lat=p.lat,
                 lon=p.lon,
-                sign_type=SIGN_TYPE_RESIDENT_AREA,
+                sign_type=SIGN_TYPE_NO_OVERTAKING,
                 speed_limit=0,
                 heading=hd,
                 is_camera=False,
                 source="VietMap",
                 priority=PRIORITY_VIETMAP,
-                desc="VietMap Resident Area",
+                desc="VietMap No Overtaking Start",
                 kind="sign",
                 sub_type=0,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
-        elif p.type == vmd.TYPE_TOLL_BOOTH:
-            # Type 5: Sign 5 TOLL_BOOTH, speed = 0
+        elif p.type == vmd.TYPE_NO_OVERTAKING_END:
+            # Type 6: Sign 3 NO_OVERTAKING, subType 1 (hết cấm vượt), speed = 0
+            pt = AlertPoint(
+                lat=p.lat,
+                lon=p.lon,
+                sign_type=SIGN_TYPE_NO_OVERTAKING,
+                speed_limit=0,
+                heading=hd,
+                is_camera=False,
+                source="VietMap",
+                priority=PRIORITY_VIETMAP,
+                desc="VietMap No Overtaking End",
+                kind="sign",
+                sub_type=1,
+                original_type=p.type,
+                decoded_heading=p.heading,
+            )
+        elif p.type == vmd.TYPE_UNCLEAR_7:
+            # Type 7: Sign 10 DANGER_OTHER, subType 7 (chú ý đoạn đường phía trước), speed = 0
+            pt = AlertPoint(
+                lat=p.lat,
+                lon=p.lon,
+                sign_type=SIGN_TYPE_DANGER_OTHER,
+                speed_limit=0,
+                heading=hd,
+                is_camera=False,
+                source="VietMap",
+                priority=PRIORITY_VIETMAP,
+                desc="VietMap Attention Caution",
+                kind="sign",
+                sub_type=7,
+                original_type=p.type,
+                decoded_heading=p.heading,
+            )
+        elif p.type == vmd.TYPE_UNCLEAR_10:
+            # Type 10: Sign 10 DANGER_OTHER, subType 10 (chỉ vẽ, không đọc), speed = 0
+            pt = AlertPoint(
+                lat=p.lat,
+                lon=p.lon,
+                sign_type=SIGN_TYPE_DANGER_OTHER,
+                speed_limit=0,
+                heading=hd,
+                is_camera=False,
+                source="VietMap",
+                priority=PRIORITY_VIETMAP,
+                desc="VietMap High Speed Warning (Visual Only)",
+                kind="sign",
+                sub_type=10,
+                original_type=p.type,
+                decoded_heading=p.heading,
+            )
+        elif p.type == vmd.TYPE_TOLL:
+            # Type 8: Sign 5 TOLL_BOOTH, subType 0, speed = 0, hướng 0xFFFF
             pt = AlertPoint(
                 lat=p.lat,
                 lon=p.lon,
@@ -287,12 +391,12 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 priority=PRIORITY_VIETMAP,
                 desc="VietMap Toll Booth",
                 kind="sign",
+                sub_type=0,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
-        elif p.type in (vmd.TYPE_VM_TYPE_8, vmd.TYPE_VM_TYPE_9):
-            # Type 8, 9: Sign 10 DANGER_OTHER, sub_type = 8 hoặc 9, speed = 0 (D2, Kế hoạch 1.J)
-            # Ngoại lệ F1: loại 8 ghi 0xFFFF; loại 9 giữ nguyên hướng
+        elif p.type == vmd.TYPE_TUNNEL:
+            # Type 9: Sign 10 DANGER_OTHER, sub_type = 9 (hầm), speed = 0
             pt = AlertPoint(
                 lat=p.lat,
                 lon=p.lon,
@@ -302,41 +406,9 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 is_camera=False,
                 source="VietMap",
                 priority=PRIORITY_VIETMAP,
-                desc=f"VietMap Other (Type {p.type})",
+                desc="VietMap Tunnel",
                 kind="sign",
-                sub_type=p.type,
-                original_type=p.type,
-                decoded_heading=p.heading,
-            )
-        elif p.type == vmd.TYPE_VM_DANGER_7:
-            # Type 7: Sign 10 DANGER_OTHER, speed = 0 (Bước 3b)
-            pt = AlertPoint(
-                lat=p.lat,
-                lon=p.lon,
-                sign_type=SIGN_TYPE_DANGER_OTHER,
-                speed_limit=0,
-                heading=hd,
-                is_camera=False,
-                source="VietMap",
-                priority=PRIORITY_VIETMAP,
-                desc="VietMap Danger/Other",
-                kind="sign",
-                original_type=p.type,
-                decoded_heading=p.heading,
-            )
-        elif p.type == vmd.TYPE_NO_OVERTAKING:
-            # Type 10: Sign 3 NO_OVERTAKING, speed = 0
-            pt = AlertPoint(
-                lat=p.lat,
-                lon=p.lon,
-                sign_type=SIGN_TYPE_NO_OVERTAKING,
-                speed_limit=0,
-                heading=hd,
-                is_camera=False,
-                source="VietMap",
-                priority=PRIORITY_VIETMAP,
-                desc="VietMap No Overtaking",
-                kind="sign",
+                sub_type=9,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
@@ -353,6 +425,7 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 priority=PRIORITY_VIETMAP,
                 desc="VietMap Camera",
                 kind="camera",
+                sub_type=0,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
@@ -687,6 +760,9 @@ def deduplicate_points(
                 continue
             if not p.is_camera and p.sign_type != m.sign_type:
                 continue
+            # Khử trùng cấm vượt (sign 3): so cả subType (0: bắt đầu, 1: hết)
+            if not p.is_camera and p.sign_type == SIGN_TYPE_NO_OVERTAKING and p.sub_type != m.sub_type:
+                continue
 
             if m.source == p.source:
                 if p.source == "VietMap":
@@ -746,7 +822,7 @@ def deduplicate_points(
             # 2. Kế thừa hướng (Bước 4, Kế hoạch 1.G): Master 0xFFFF lấy hướng thật của điểm bị bỏ
             # F1: VietMap hướng 0 là hướng hợp lệ (is_heading_known=True), không bị ghi đè.
             # VietMap loại 8 giữ 0xFFFF (không kế thừa hướng).
-            is_type8 = (getattr(matched_master, "original_type", None) == vmd.TYPE_VM_TYPE_8 or matched_master.sub_type == 8)
+            is_type8 = (getattr(matched_master, "original_type", None) == vmd.TYPE_TOLL or getattr(matched_master, "original_type", None) == 8)
             if not is_type8 and not is_heading_known(matched_master.heading, matched_master.source) and is_heading_known(p.heading, p.source):
                 matched_master.heading = p.heading
                 stats_counter["inherited_heading"] += 1
@@ -762,10 +838,18 @@ def deduplicate_points(
     return master_points
 
 
-def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertPoint], dict]:
+def merge_and_deduplicate(
+    all_candidates: list[AlertPoint],
+    osm_signals: list[tuple[float, float]] | list[list[float]] | None = None,
+) -> tuple[list[AlertPoint], dict]:
     """
-    Hợp nhất và khử trùng lặp theo quy chuẩn R3:
+    Hợp nhất và khử trùng lặp theo quy chuẩn R3/R5b/R5c:
       - Bước 1: Làm sạch heading giả.
+      - Bước 1b (R5c):
+          + A1: Bỏ biển KDC Base/WYN <= 40m đèn OSM hoặc <= 45m đèn VietMap (kdc_at_signal_dropped).
+          + A2: Bỏ biển cấm vượt Base/WYN trong 4 lõi nội đô (urban_no_overtaking_dropped).
+          + A3: Biển KDC Base/WYN chỉ giữ khi cách mọi biển KDC VietMap > 300m (kdc_near_vietmap_dropped).
+          + Làm sạch bản sao cũ Base/WYN (STALE_OLD_MAP).
       - Bước 2: Camera là nguồn chuẩn duy nhất (xử lý sign type 4 theo camera, loại bỏ khỏi signs).
       - Bước 3: Luật khử trùng KHÁC NGUỒN (VietMap > WYN > Base, bán kính: camera 30m, đèn 45m, biển 20m).
     """
@@ -784,6 +868,11 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
         "inherited_heading": 0,
         "bogus_headings": bogus_headings,
         "bogus_headings_report_only": bogus_report_only,
+        "stale_copy_dropped": defaultdict(int),
+        "urban_kdc_dropped": 0,
+        "kdc_at_signal_dropped": 0,
+        "urban_no_overtaking_dropped": 0,
+        "kdc_near_vietmap_dropped": 0,
         "sign_type_4_dropped_duplicate": 0,
         "sign_type_4_converted_to_camera": 0,
         "base_speed_sign_zero_dropped": GLOBAL_DROP_STATS["base_speed_sign_zero_dropped"],
@@ -794,10 +883,117 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
         "vm_identical_dropped_in_dedup": 0,
     }
 
+    # Bước 1b: Xây dựng chỉ mục "bản sao cũ" (STALE_OLD_MAP), KDC VietMap, đèn VietMap (Chuẩn R5c)
+    vm_stale_index = SpatialAlertIndex(cell_deg=0.0005)
+    vm_stale_targets = []
+    vm_kdc_index = SpatialAlertIndex(cell_deg=0.0005)
+    vm_kdc_targets = []
+    vm_light_index = SpatialAlertIndex(cell_deg=0.0005)
+    vm_light_targets = []
+
+    for p in all_candidates:
+        if p.source == "VietMap":
+            orig_t = getattr(p, "original_type", None)
+            if orig_t in STALE_OLD_MAP:
+                idx = len(vm_stale_targets)
+                vm_stale_targets.append(p)
+                vm_stale_index.insert(idx, p)
+            if not p.is_camera and p.sign_type == SIGN_TYPE_RESIDENT_AREA:
+                kdc_idx = len(vm_kdc_targets)
+                vm_kdc_targets.append(p)
+                vm_kdc_index.insert(kdc_idx, p)
+            if not p.is_camera and p.sign_type == SIGN_TYPE_TRAFFIC_LIGHT:
+                light_idx = len(vm_light_targets)
+                vm_light_targets.append(p)
+                vm_light_index.insert(light_idx, p)
+
+    osm_signal_index = None
+    osm_signal_targets = []
+    if osm_signals:
+        osm_signal_index = SpatialAlertIndex(cell_deg=0.0005)
+        for s in osm_signals:
+            idx = len(osm_signal_targets)
+            pt = AlertPoint(
+                lat=s[0],
+                lon=s[1],
+                sign_type=SIGN_TYPE_TRAFFIC_LIGHT,
+                speed_limit=-1,
+                heading=DIR_OMNI,
+                is_camera=False,
+                source="OSM",
+                priority=PRIORITY_OSM,
+                desc="OSM Signal",
+            )
+            osm_signal_targets.append(pt)
+            osm_signal_index.insert(idx, pt)
+
+    clean_candidates = []
+    for p in all_candidates:
+        if p.source in ("Base", "WYN") and not p.is_camera:
+            # A1 (Chuẩn R5c): Bỏ biển KDC (sign 2) nguồn WYN/nền nằm <= 40 m đèn OSM HOẶC <= 45 m đèn VietMap
+            if p.sign_type == SIGN_TYPE_RESIDENT_AREA:
+                near_osm_signal = False
+                if osm_signal_index:
+                    near_osm_signal = bool(osm_signal_index.find_nearby(p, osm_signal_targets, radius_m=40.0))
+                near_vm_light = bool(vm_light_index.find_nearby(p, vm_light_targets, radius_m=45.0))
+                if near_osm_signal or near_vm_light:
+                    stats["kdc_at_signal_dropped"] += 1
+                    stats["noise_dropped"] += 1
+                    pair_key = f"{p.source}->Signal"
+                    stats["dropped_by_source_pair"][pair_key]["kdc_at_signal"] += 1
+                    continue
+
+                # A3 (Chuẩn R5c): Biển KDC nguồn WYN/nền chỉ giữ khi cách mọi biển KDC VietMap (sign 2, mọi subType) > 300 m
+                nearby_kdc = vm_kdc_index.find_nearby(p, vm_kdc_targets, radius_m=300.0)
+                if nearby_kdc:
+                    stats["kdc_near_vietmap_dropped"] += 1
+                    stats["noise_dropped"] += 1
+                    pair_key = f"{p.source}->VietMap"
+                    stats["dropped_by_source_pair"][pair_key]["kdc_near_vietmap"] += 1
+                    continue
+
+                # Bước 3.1 (Chuẩn R5b): Biển KDC Base/WYN nằm trong nội đô (4 hộp HN, HCM, ĐN, HP) không gần VietMap -> BỎ
+                if is_in_core_urban_4cities(p.lat, p.lon):
+                    stats["urban_kdc_dropped"] += 1
+                    stats["noise_dropped"] += 1
+                    pair_key = f"{p.source}->VietMap"
+                    stats["dropped_by_source_pair"][pair_key]["urban_kdc"] += 1
+                    continue
+
+            # A2 (Chuẩn R5c): Bỏ biển cấm vượt (sign 3) nguồn WYN/nền trong 4 hộp nội đô (HN, HCM, Đà Nẵng, Hải Phòng)
+            if p.sign_type == SIGN_TYPE_NO_OVERTAKING and is_in_core_urban_4cities(p.lat, p.lon):
+                stats["urban_no_overtaking_dropped"] += 1
+                stats["noise_dropped"] += 1
+                pair_key = f"{p.source}->Urban"
+                stats["dropped_by_source_pair"][pair_key]["urban_no_overtaking"] += 1
+                continue
+
+            radius = RADIUS_LIGHT_M if p.sign_type == SIGN_TYPE_TRAFFIC_LIGHT else RADIUS_OTHER_SIGN_M
+            nearby_vm = vm_stale_index.find_nearby(p, vm_stale_targets, radius_m=radius)
+            is_stale = False
+            matched_vm = None
+            if nearby_vm:
+                nearby_vm.sort(key=lambda x: x[0])
+                for dist, _, vm in nearby_vm:
+                    vm_t = getattr(vm, "original_type", None)
+                    if vm_t in STALE_OLD_MAP and p.sign_type in STALE_OLD_MAP[vm_t]:
+                        is_stale = True
+                        matched_vm = vm
+                        break
+            if is_stale:
+                vm_t = getattr(matched_vm, "original_type", None)
+                stats["stale_copy_dropped"][(p.source, vm_t, p.sign_type)] += 1
+                stats["noise_dropped"] += 1
+                pair_key = f"{p.source}->VietMap"
+                cat_name = "light" if p.sign_type == SIGN_TYPE_TRAFFIC_LIGHT else f"sign_{p.sign_type}"
+                stats["dropped_by_source_pair"][pair_key][f"stale_copy_{cat_name}"] += 1
+                continue
+        clean_candidates.append(p)
+
     # Phân loại ứng viên
-    cam_candidates = [p for p in all_candidates if p.is_camera]
-    sign_candidates = [p for p in all_candidates if not p.is_camera and p.sign_type != 4]
-    sign_4_candidates = [p for p in all_candidates if not p.is_camera and p.sign_type == 4]
+    cam_candidates = [p for p in clean_candidates if p.is_camera]
+    sign_candidates = [p for p in clean_candidates if not p.is_camera and p.sign_type != 4]
+    sign_4_candidates = [p for p in clean_candidates if not p.is_camera and p.sign_type == 4]
 
     # 1. Khử trùng Cameras (bán kính 30m)
     master_cameras = deduplicate_points(
@@ -932,7 +1128,7 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
     vm_heading_mismatches = []
     for p in vm_out_points:
         orig_t = getattr(p, "original_type", None)
-        if orig_t == vmd.TYPE_VM_TYPE_8 or p.sub_type == 8:
+        if orig_t in (vmd.TYPE_TOLL, 8):
             if p.heading != DIR_OMNI:
                 vm_heading_mismatches.append(
                     f"VietMap Type 8 (lat={p.lat:.6f}, lon={p.lon:.6f}) heading={p.heading} != 0xFFFF"
@@ -950,7 +1146,7 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
             + "\n".join(vm_heading_mismatches[:10])
         )
 
-    print(f"[OK] Hoàn tất khử trùng lặp và làm sạch dữ liệu chuẩn R4:")
+    print(f"[OK] Hoàn tất khử trùng lặp và làm sạch dữ liệu chuẩn R5b:")
     print(f"     + Điểm VietMap giữ lại:   {stats['vietmap_kept']:,}")
     print(f"     + Điểm WYN giữ lại:       {stats['wyn_kept']:,}")
     print(f"     + Điểm nền Base giữ lại:  {stats['base_kept']:,}")
@@ -962,6 +1158,10 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
     print(f"     ! Biển loại 1 nền tốc độ 0 bỏ: {stats['base_speed_sign_zero_dropped']:,}")
     print(f"     ! Biển loại 1 nền tốc độ 0 mâu thuẫn VietMap bỏ: {stats['base_end_sign_conflict_vietmap_dropped']:,}")
     print(f"     ! Biển loại 1 tốc độ sai chuẩn bỏ: {stats['speed_sign_invalid_dropped']:,}")
+    print(f"     ! Biển KDC Base/WYN tại đèn (OSM/VM) bỏ (A1): {stats['kdc_at_signal_dropped']:,}")
+    print(f"     ! Biển cấm vượt Base/WYN nội đô 4 TP bỏ (A2): {stats['urban_no_overtaking_dropped']:,}")
+    print(f"     ! Biển KDC Base/WYN gần VietMap <=300m bỏ (A3): {stats['kdc_near_vietmap_dropped']:,}")
+    print(f"     ! Biển KDC Base/WYN nội đô không có VietMap bỏ: {stats['urban_kdc_dropped']:,}")
     print(f"     ! VietMap type 8 chuyển hướng về 0xFFFF: {stats['vietmap_type8_heading_zero_as_unknown']:,}")
     print(f"     ! Sign type 4 bỏ do trùng:{stats['sign_type_4_dropped_duplicate']:,}")
     print(f"     ! Sign type 4 thành camera:{stats['sign_type_4_converted_to_camera']:,}")
@@ -969,6 +1169,10 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
         print(f"     ! Nhóm heading giả làm sạch: {len(bogus_headings)}")
     if bogus_report_only:
         print(f"     ! Nhóm heading giả VietMap (chỉ báo cáo): {len(bogus_report_only)}")
+
+    total_stale = sum(stats["stale_copy_dropped"].values())
+    if total_stale > 0:
+        print(f"     ! Bản sao cũ Base/WYN bị loại (STALE_OLD_MAP): {total_stale:,}")
 
     return master_points, stats
 
@@ -1326,6 +1530,10 @@ def export_binary_files(
         "sign_type_4_converted_to_camera": (stats_merge or {}).get("sign_type_4_converted_to_camera", 0),
         "base_speed_sign_zero_dropped": (stats_merge or {}).get("base_speed_sign_zero_dropped", 0),
         "base_end_sign_conflict_vietmap_dropped": (stats_merge or {}).get("base_end_sign_conflict_vietmap_dropped", 0),
+        "urban_kdc_dropped": (stats_merge or {}).get("urban_kdc_dropped", 0),
+        "kdc_at_signal_dropped": (stats_merge or {}).get("kdc_at_signal_dropped", 0),
+        "urban_no_overtaking_dropped": (stats_merge or {}).get("urban_no_overtaking_dropped", 0),
+        "kdc_near_vietmap_dropped": (stats_merge or {}).get("kdc_near_vietmap_dropped", 0),
         "speed_sign_invalid_dropped": (stats_merge or {}).get("speed_sign_invalid_dropped", 0),
         "vietmap_type8_heading_zero_as_unknown": (stats_merge or {}).get("vietmap_type8_heading_zero_as_unknown", 0),
         "dropped_by_source_pair": (stats_merge or {}).get("dropped_by_source_pair", {}),
@@ -1336,7 +1544,14 @@ def export_binary_files(
             "sign_type_1_speed_0_count": sign_type_1_speed_0_count,
         },
         "counts_by_source_and_type": {src: dict(cnt) for src, cnt in counts_by_source_and_type.items()},
-        "deduplication_stats": stats_merge or {},
+        "stale_copy_dropped": {
+            f"{k[0]},{k[1]},{k[2]}" if isinstance(k, tuple) else str(k): v
+            for k, v in (stats_merge or {}).get("stale_copy_dropped", {}).items()
+        },
+        "deduplication_stats": {
+            k: ({f"{tk[0]},{tk[1]},{tk[2]}" if isinstance(tk, tuple) else str(tk): tv for tk, tv in v.items()} if k == "stale_copy_dropped" and isinstance(v, dict) else v)
+            for k, v in (stats_merge or {}).items()
+        },
     }
 
     with open(stats_path, "w", encoding="utf-8") as f:
@@ -1362,7 +1577,7 @@ def export_binary_files(
         )
         sp = signs[i]
         if sp.source == "VietMap":
-            if getattr(sp, "original_type", None) == vmd.TYPE_VM_TYPE_8 or sp.sub_type == 8:
+            if getattr(sp, "original_type", None) in (vmd.TYPE_TOLL, 8):
                 if shd != DIR_OMNI:
                     raise SystemExit(f"[LOI F1] signs.bin ghi sai hướng VietMap Type 8 id={sid}: ghi {shd} != 0xFFFF")
             else:
@@ -1386,7 +1601,16 @@ def write_manifest(
     manifest_path = out_dir / "manifest.txt"
     lines = [f"version {version}"]
 
-    for fname in ["cameras.bin", "signs.bin"]:
+    all_files = [
+        "metadata.bin",
+        "index.bin",
+        "tiles.bin",
+        "cameras.bin",
+        "signs.bin",
+        "names.bin",
+        "seg_names.bin",
+    ]
+    for fname in all_files:
         fpath = out_dir / fname
         if fpath.exists():
             size = fpath.stat().st_size
@@ -1420,6 +1644,8 @@ def main():
                         help="Thư mục chứa dữ liệu nền cameras.bin và signs.bin")
     parser.add_argument("--osm-signs", type=Path, default=None,
                         help="Đường dẫn file osm_signs.bin chứa đèn (6) và trạm thu phí (5) từ mạng đường OSM")
+    parser.add_argument("--osm-ground-truth", "--osm", type=Path, default=REPO_ROOT / "build" / "osm_ground_truth.json",
+                        help="Đường dẫn file osm_ground_truth.json (traffic_signals dùng cho bước A1)")
     parser.add_argument("--out", type=Path, required=True,
                         help="Thư mục xuất kết quả")
     parser.add_argument("--version", type=str, default=None,
@@ -1464,8 +1690,18 @@ def main():
         print("[LOI] Không có điểm cảnh báo nào được nạp!")
         sys.exit(1)
 
+    osm_signals = []
+    if args.osm_ground_truth and args.osm_ground_truth.exists():
+        try:
+            with open(args.osm_ground_truth, "r", encoding="utf-8") as f:
+                osm_gt = json.load(f)
+                osm_signals = osm_gt.get("traffic_signals", [])
+            print(f"[*] Đã nạp {len(osm_signals):,} đèn tín hiệu OSM từ {args.osm_ground_truth} (phục vụ A1)")
+        except Exception as e:
+            print(f"[CANH BAO] Không thể đọc file OSM ground truth {args.osm_ground_truth}: {e}")
+
     # Khử trùng lặp
-    master_points, stats = merge_and_deduplicate(all_candidates)
+    master_points, stats = merge_and_deduplicate(all_candidates, osm_signals=osm_signals)
 
     # Gán ID ổn định
     allocate_stable_ids(master_points)

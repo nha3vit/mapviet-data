@@ -39,15 +39,15 @@ class TestAlerts(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_vietmap_mapping_types(self):
-        """VietMap type 1 -> sign 1 có speed; type 2 -> sign 6; type 11 -> camera speed 0."""
+        """VietMap type 1 -> sign 1 có speed; type 2 -> sign 2 subType 0; type 11 -> camera speed 0 (R5a)."""
         vm_bin = self.td / "secrect.bin"
         lines = [
             b"HEADER" + encode_vm_line("20261118"),
             encode_vm_line("105.840000,21.040000,1,60,0,90"),   # Type 1: speed 60
-            encode_vm_line("105.850000,21.050000,2,0,0,180"),   # Type 2: traffic light
-            encode_vm_line("105.860000,21.060000,4,0,0,0"),     # Type 4: resident
-            encode_vm_line("105.870000,21.070000,5,0,0,45"),    # Type 5: toll booth
-            encode_vm_line("105.880000,21.080000,10,0,0,270"),  # Type 10: no overtaking
+            encode_vm_line("105.850000,21.050000,2,0,0,180"),   # Type 2: resident enter
+            encode_vm_line("105.860000,21.060000,4,0,0,0"),     # Type 4: pending 4
+            encode_vm_line("105.870000,21.070000,5,0,0,45"),    # Type 5: pending 5
+            encode_vm_line("105.880000,21.080000,10,0,0,270"),  # Type 10: pending 10
             encode_vm_line("105.890000,21.090000,11,0,0,15"),   # Type 11: camera
         ]
         vm_bin.write_bytes(b"\x83\x71".join(lines))
@@ -66,12 +66,20 @@ class TestAlerts(unittest.TestCase):
         # Type 1 -> Sign 1
         s1 = next(p for p in signs if p.sign_type == 1)
         self.assertEqual(s1.speed_limit, 60)
-        # Type 2 -> Sign 6
-        s6 = next(p for p in signs if p.sign_type == 6)
-        self.assertEqual(s6.speed_limit, 0)
-        # Type 4 -> Sign 2
+        # Type 2 -> Sign 2 (RESIDENT_AREA), subType 0
         s2 = next(p for p in signs if p.sign_type == 2)
+        self.assertEqual(s2.speed_limit, 0)
         self.assertEqual(s2.sub_type, 0)
+        # R5b: Type 4 -> Sign 6 (TRAFFIC_LIGHT), subType 0; Type 5 -> Sign 3 (NO_OVERTAKING), subType 0; Type 10 -> Sign 10, subType 10
+        s4 = next(p for p in signs if getattr(p, "original_type", None) == 4)
+        self.assertEqual(s4.sign_type, alerts.SIGN_TYPE_TRAFFIC_LIGHT)
+        self.assertEqual(s4.sub_type, 0)
+        s5 = next(p for p in signs if getattr(p, "original_type", None) == 5)
+        self.assertEqual(s5.sign_type, alerts.SIGN_TYPE_NO_OVERTAKING)
+        self.assertEqual(s5.sub_type, 0)
+        s10 = next(p for p in signs if getattr(p, "original_type", None) == 10)
+        self.assertEqual(s10.sign_type, alerts.SIGN_TYPE_DANGER_OTHER)
+        self.assertEqual(s10.sub_type, 10)
 
     def test_signs_cameras_bin_separation_and_speed_constraints(self):
         """signs.bin không chứa camera; cameras.bin chỉ có speed in {-1, 0} ∪ {5..130 bội số 5}."""

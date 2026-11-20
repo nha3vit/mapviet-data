@@ -85,13 +85,14 @@ def sha256_file(path: Path) -> str:
 
 
 class SpeedMapValidator:
-    def __init__(self, target_dir: Path, pub_key_path: Path | None = None, sample_size: int = 5000, seed: int = 42, sounds_ref_dir: Path | None = None, prev_dir: Path | None = None):
+    def __init__(self, target_dir: Path, pub_key_path: Path | None = None, sample_size: int = 5000, seed: int = 42, sounds_ref_dir: Path | None = None, prev_dir: Path | None = None, osm_path: Path | None = None):
         self.target_dir = Path(target_dir)
         self.pub_key_path = Path(pub_key_path) if pub_key_path else None
         self.sample_size = sample_size
         self.seed = seed
         self.sounds_ref_dir = Path(sounds_ref_dir) if sounds_ref_dir else None
         self.prev_dir = Path(prev_dir) if prev_dir else None
+        self.osm_path = Path(osm_path) if osm_path else None
 
         self.errors: list[str] = []
         self.warnings: list[str] = []
@@ -685,6 +686,225 @@ class SpeedMapValidator:
             self.add_error(sec, msg)
 
     # -------------------------------------------------------------------------
+    # 10. OSM Gates (Cổng kiểm định chất lượng độc lập bằng OSM)
+    # -------------------------------------------------------------------------
+    def validate_osm_gates(self):
+        sec = "osm_gates"
+        self._init_section(sec)
+        if not self.osm_path:
+            return
+        if not self.osm_path.exists():
+            self.add_error(sec, f"Không tìm thấy file OSM ground truth: {self.osm_path}")
+            return
+
+        try:
+            with open(self.osm_path, "r", encoding="utf-8") as f:
+                osm_data = json.load(f)
+        except Exception as e:
+            self.add_error(sec, f"Không thể đọc file OSM ground truth {self.osm_path}: {e}")
+            return
+
+        toll_booths = osm_data.get("toll_booths", [])
+        traffic_signals = osm_data.get("traffic_signals", [])
+        tunnel_portals = osm_data.get("tunnel_portals", [])
+
+        GRID_DEG = 0.005  # ~550m
+
+        def make_grid(pts):
+            g = defaultdict(list)
+            for p in pts:
+                la, lo = p[0], p[1]
+                g[(int(la / GRID_DEG), int(lo / GRID_DEG))].append((la, lo))
+            return g
+
+        toll_grid = make_grid(toll_booths)
+        signal_grid = make_grid(traffic_signals)
+        tunnel_grid = make_grid(tunnel_portals)
+
+        def has_nearby(lat: float, lon: float, grid: dict, radius_m: float) -> bool:
+            r_cells = max(1, int(math.ceil(radius_m / (GRID_DEG * 111000.0))))
+            cy, cx = int(lat / GRID_DEG), int(lon / GRID_DEG)
+            for dy in range(-r_cells, r_cells + 1):
+                for dx in range(-r_cells, r_cells + 1):
+                    for la, lo in grid.get((cy + dy, cx + dx), []):
+                        if haversine_m(lat, lon, la, lo) <= radius_m:
+                            return True
+            return False
+
+        def is_in_core_urban(lat: float, lon: float) -> bool:
+            hn = (20.99 <= lat <= 21.06) and (105.80 <= lon <= 105.87)
+            hcm = (10.75 <= lat <= 10.81) and (106.66 <= lon <= 106.72)
+            return hn or hcm
+
+        # 1. Đọc signs.bin
+        signs_path = self.target_dir / "signs.bin"
+        signs_points = []
+        if signs_path.exists():
+            sdata = signs_path.read_bytes()
+            if len(sdata) >= 20:
+                sbody = sdata[20:]
+                scount = len(sbody) // 20
+                for i in range(scount):
+                    sid, lat_e7, lon_e7, hd, stype, spd, sub, flg, sres = struct.unpack_from(SIGN_POINT_FMT, sbody, i * 20)
+                    signs_points.append((lat_e7 / 1e7, lon_e7 / 1e7, stype, sub, sres))
+
+        # 2. Đọc cameras.bin & tra cứu nguồn nếu có combined_traffic_alerts.csv
+        cam_sources = {}
+        for candidate_csv in [
+            self.target_dir / "combined_traffic_alerts.csv",
+            self.target_dir.parent / "alerts" / "combined_traffic_alerts.csv",
+            self.target_dir.parent / "combined_traffic_alerts.csv",
+        ]:
+            if candidate_csv.exists():
+                try:
+                    import csv
+                    with open(candidate_csv, "r", encoding="utf-8-sig") as f:
+                        for row in csv.DictReader(f):
+                            if row.get("la_camera") == "1":
+                                cid_val = int(row["id"])
+                                cam_sources[cid_val] = row.get("nguon_du_lieu", "")
+                    if cam_sources:
+                        break
+                except Exception:
+                    pass
+
+        cams_path = self.target_dir / "cameras.bin"
+        cam_points = []
+        if cams_path.exists():
+            cdata = cams_path.read_bytes()
+            ccount = len(cdata) // 20
+            for i in range(ccount):
+                cid, lat_e7, lon_e7, spd, hd = struct.unpack_from(CAMERA_FMT, cdata, i * 20)
+                cam_points.append((lat_e7 / 1e7, lon_e7 / 1e7, cam_sources.get(cid, "VietMap")))
+
+        # Cổng 1: sign 5 (trạm thu phí) >= 85% có trạm OSM <= 300 m
+        toll_signs = [p for p in signs_points if p[2] == 5]
+        toll_near_osm = sum(1 for lat, lon, _, _, _ in toll_signs if has_nearby(lat, lon, toll_grid, 300.0))
+        toll_ratio = (toll_near_osm / len(toll_signs)) if toll_signs else 1.0
+        print(f"[INFO] [{sec}] Cổng 1 (Trạm thu phí sign 5 <= 300m OSM): {toll_ratio*100:.2f}% ({toll_near_osm}/{len(toll_signs)}) - Ngưỡng >= 85%")
+        if toll_signs and toll_ratio < 0.85:
+            self.add_error(sec, f"Cổng kiểm định trạm thu phí không đạt: {toll_ratio*100:.2f}% < ngưỡng 85.0% ({toll_near_osm}/{len(toll_signs)})")
+
+        # Cổng 2: sign 2 subType 0 (vào KDC) <= 2% nằm trong nội đô Hà Nội & TP.HCM
+        kdc_enter_signs = [p for p in signs_points if p[2] == 2 and p[3] == 0]
+        kdc_urban_count = sum(1 for lat, lon, _, _, _ in kdc_enter_signs if is_in_core_urban(lat, lon))
+        kdc_ratio = (kdc_urban_count / len(kdc_enter_signs)) if kdc_enter_signs else 0.0
+        print(f"[INFO] [{sec}] Cổng 2 (Vào KDC sign 2 sub 0 nội đô HN/HCM): {kdc_ratio*100:.2f}% ({kdc_urban_count}/{len(kdc_enter_signs)}) - Ngưỡng <= 2%")
+        if kdc_enter_signs and kdc_ratio > 0.02:
+            self.add_error(sec, f"Cổng kiểm định KDC nội đô không đạt: {kdc_ratio*100:.2f}% > ngưỡng 2.0% ({kdc_urban_count}/{len(kdc_enter_signs)})")
+
+        # Cổng 3: sign 10 subType 9 (hầm) >= 60% có cửa hầm OSM <= 100 m
+        tunnel_signs = [p for p in signs_points if p[2] == 10 and p[3] == 9]
+        tunnel_near_osm = sum(1 for lat, lon, _, _, _ in tunnel_signs if has_nearby(lat, lon, tunnel_grid, 100.0))
+        tunnel_ratio = (tunnel_near_osm / len(tunnel_signs)) if tunnel_signs else 1.0
+        print(f"[INFO] [{sec}] Cổng 3 (Hầm sign 10 sub 9 <= 100m cửa hầm OSM): {tunnel_ratio*100:.2f}% ({tunnel_near_osm}/{len(tunnel_signs)}) - Ngưỡng >= 60%")
+        if tunnel_signs and tunnel_ratio < 0.60:
+            self.add_error(sec, f"Cổng kiểm định hầm đường bộ không đạt: {tunnel_ratio*100:.2f}% < ngưỡng 60.0% ({tunnel_near_osm}/{len(tunnel_signs)})")
+
+        # Cổng 4: camera nguồn VietMap trong nội đô HN/HCM >= 85% có đèn OSM <= 40 m
+        # In thêm tỷ lệ của Base/WYN dạng THÔNG TIN
+        urban_cams_vm = [p for p in cam_points if p[2] == "VietMap" and is_in_core_urban(p[0], p[1])]
+        urban_cams_near_signals = sum(1 for lat, lon, _ in urban_cams_vm if has_nearby(lat, lon, signal_grid, 40.0))
+        urban_cam_ratio = (urban_cams_near_signals / len(urban_cams_vm)) if urban_cams_vm else 1.0
+        print(f"[INFO] [{sec}] Cổng 4 (Camera VietMap nội đô <= 40m đèn OSM): {urban_cam_ratio*100:.2f}% ({urban_cams_near_signals}/{len(urban_cams_vm)}) - Ngưỡng >= 85%")
+
+        urban_cams_wyn = [p for p in cam_points if p[2] == "WYN" and is_in_core_urban(p[0], p[1])]
+        if urban_cams_wyn:
+            wyn_near = sum(1 for lat, lon, _ in urban_cams_wyn if has_nearby(lat, lon, signal_grid, 40.0))
+            print(f"[INFO] [{sec}] Cổng 4 (THÔNG TIN) Camera WYN nội đô <= 40m đèn OSM: {wyn_near/len(urban_cams_wyn)*100:.2f}% ({wyn_near}/{len(urban_cams_wyn)})")
+
+        urban_cams_base = [p for p in cam_points if p[2] == "Base" and is_in_core_urban(p[0], p[1])]
+        if urban_cams_base:
+            base_near = sum(1 for lat, lon, _ in urban_cams_base if has_nearby(lat, lon, signal_grid, 40.0))
+            print(f"[INFO] [{sec}] Cổng 4 (THÔNG TIN) Camera Base nội đô <= 40m đèn OSM: {base_near/len(urban_cams_base)*100:.2f}% ({base_near}/{len(urban_cams_base)})")
+
+        if urban_cams_vm and urban_cam_ratio < 0.85:
+            self.add_error(sec, f"Cổng kiểm định camera VietMap nội đô gần đèn OSM không đạt: {urban_cam_ratio*100:.2f}% < ngưỡng 85.0% ({urban_cams_near_signals}/{len(urban_cams_vm)})")
+
+        # Cổng 5: sign 6 nguồn VietMap trong nội đô HN >= 60% có đèn OSM <= 40 m
+        def is_in_core_hn(lat: float, lon: float) -> bool:
+            return (20.99 <= lat <= 21.06) and (105.80 <= lon <= 105.87)
+
+        has_sres_1 = any(p[4] == 1 for p in signs_points)
+        if has_sres_1:
+            vm_traffic_lights_hn = [p for p in signs_points if p[2] == 6 and p[4] == 1 and is_in_core_hn(p[0], p[1])]
+        else:
+            vm_traffic_lights_hn = [p for p in signs_points if p[2] == 6 and is_in_core_hn(p[0], p[1])]
+
+        vm_light_near = sum(1 for lat, lon, _, _, _ in vm_traffic_lights_hn if has_nearby(lat, lon, signal_grid, 40.0))
+        vm_light_ratio = (vm_light_near / len(vm_traffic_lights_hn)) if vm_traffic_lights_hn else 1.0
+        print(f"[INFO] [{sec}] Cổng 5 (Đèn VietMap sign 6 nội đô HN <= 40m đèn OSM): {vm_light_ratio*100:.2f}% ({vm_light_near}/{len(vm_traffic_lights_hn)}) - Ngưỡng >= 60%")
+        if vm_traffic_lights_hn and vm_light_ratio < 0.60:
+            self.add_error(sec, f"Cổng kiểm định đèn VietMap nội đô HN không đạt: {vm_light_ratio*100:.2f}% < ngưỡng 60.0% ({vm_light_near}/{len(vm_traffic_lights_hn)})")
+
+        # Cổng 6: sign 3 subType 0 (bắt đầu cấm vượt) <= 2% nằm trong nội đô (4 hộp ở Bước 3.1)
+        def is_in_4cities(lat: float, lon: float) -> bool:
+            hn = (20.99 <= lat <= 21.06) and (105.80 <= lon <= 105.87)
+            hcm = (10.75 <= lat <= 10.81) and (106.66 <= lon <= 106.72)
+            dn = (16.03 <= lat <= 16.09) and (108.19 <= lon <= 108.25)
+            hp = (20.84 <= lat <= 20.88) and (106.66 <= lon <= 106.72)
+            return hn or hcm or dn or hp
+
+        if has_sres_1:
+            no_overtaking_signs = [p for p in signs_points if p[2] == 3 and p[3] == 0 and p[4] == 1]
+        else:
+            no_overtaking_signs = [p for p in signs_points if p[2] == 3 and p[3] == 0]
+
+        no_overtake_urban_count = sum(1 for lat, lon, _, _, _ in no_overtaking_signs if is_in_4cities(lat, lon))
+        no_overtake_ratio = (no_overtake_urban_count / len(no_overtaking_signs)) if no_overtaking_signs else 0.0
+        print(f"[INFO] [{sec}] Cổng 6 (Bắt đầu cấm vượt sign 3 sub 0 nội đô 4 TP): {no_overtake_ratio*100:.2f}% ({no_overtake_urban_count}/{len(no_overtaking_signs)}) - Ngưỡng <= 2%")
+
+        if has_sres_1:
+            wyn_overtaking = [p for p in signs_points if p[2] == 3 and p[3] == 0 and p[4] == 2]
+            if wyn_overtaking:
+                wyn_ot_urban = sum(1 for lat, lon, _, _, _ in wyn_overtaking if is_in_4cities(lat, lon))
+                print(f"[INFO] [{sec}] Cổng 6 (THÔNG TIN) Cấm vượt WYN nội đô 4 TP: {wyn_ot_urban/len(wyn_overtaking)*100:.2f}% ({wyn_ot_urban}/{len(wyn_overtaking)})")
+
+        if no_overtaking_signs and no_overtake_ratio > 0.02:
+            self.add_error(sec, f"Cổng kiểm định cấm vượt nội đô không đạt: {no_overtake_ratio*100:.2f}% > ngưỡng 2.0% ({no_overtake_urban_count}/{len(no_overtaking_signs)})")
+
+        # Cổng 7 (Chuẩn R5c): KDC nguồn WYN/nền (sign 2) <= 40m đèn OSM <= 5.0%
+        wyn_base_kdc = [p for p in signs_points if p[2] == 2 and (p[4] in (0, 2) if has_sres_1 else True)]
+        kdc_wyn_base_near_signals = sum(1 for lat, lon, _, _, _ in wyn_base_kdc if has_nearby(lat, lon, signal_grid, 40.0))
+        kdc_wyn_base_ratio = (kdc_wyn_base_near_signals / len(wyn_base_kdc)) if wyn_base_kdc else 0.0
+        print(f"[INFO] [{sec}] Cổng 7 (KDC WYN/nền sign 2 <= 40m đèn OSM): {kdc_wyn_base_ratio*100:.2f}% ({kdc_wyn_base_near_signals}/{len(wyn_base_kdc)}) - Ngưỡng <= 5.0%")
+        if wyn_base_kdc and kdc_wyn_base_ratio > 0.05:
+            self.add_error(sec, f"Cổng kiểm định KDC WYN/nền gần đèn OSM không đạt: {kdc_wyn_base_ratio*100:.2f}% > ngưỡng 5.0% ({kdc_wyn_base_near_signals}/{len(wyn_base_kdc)})")
+
+        # Cổng 8 (Chuẩn R5c): Cấm vượt WYN/nền (sign 3) trong nội đô 4 TP = 0
+        wyn_base_overtake = [p for p in signs_points if p[2] == 3 and (p[4] in (0, 2) if has_sres_1 else True)]
+        urban_no_overtake_count = sum(1 for lat, lon, _, _, _ in wyn_base_overtake if is_in_4cities(lat, lon))
+        print(f"[INFO] [{sec}] Cổng 8 (Cấm vượt WYN/nền sign 3 nội đô 4 TP): {urban_no_overtake_count} điểm ({urban_no_overtake_count}/{len(wyn_base_overtake)}) - Ngưỡng = 0")
+        if urban_no_overtake_count > 0:
+            self.add_error(sec, f"Cổng kiểm định cấm vượt WYN/nền nội đô 4 TP không đạt: {urban_no_overtake_count} điểm > ngưỡng 0")
+
+        self.section_results[sec]["details"] = {
+            "toll_gate_ratio": round(toll_ratio, 4),
+            "toll_near_osm": toll_near_osm,
+            "toll_total": len(toll_signs),
+            "kdc_urban_ratio": round(kdc_ratio, 4),
+            "kdc_urban_count": kdc_urban_count,
+            "kdc_total": len(kdc_enter_signs),
+            "tunnel_gate_ratio": round(tunnel_ratio, 4),
+            "tunnel_near_osm": tunnel_near_osm,
+            "tunnel_total": len(tunnel_signs),
+            "urban_camera_signal_ratio": round(urban_cam_ratio, 4),
+            "urban_cameras_near_signals": urban_cams_near_signals,
+            "urban_cameras_total": len(urban_cams_vm),
+            "vm_traffic_light_urban_ratio": round(vm_light_ratio, 4),
+            "vm_traffic_light_near_osm": vm_light_near,
+            "vm_traffic_light_total": len(vm_traffic_lights_hn),
+            "no_overtaking_urban_ratio": round(no_overtake_ratio, 4),
+            "no_overtaking_urban_count": no_overtake_urban_count,
+            "no_overtaking_total": len(no_overtaking_signs),
+            "kdc_wyn_base_signal_ratio": round(kdc_wyn_base_ratio, 4),
+            "kdc_wyn_base_near_signals": kdc_wyn_base_near_signals,
+            "kdc_wyn_base_total": len(wyn_base_kdc),
+            "urban_no_overtake_wyn_base_count": urban_no_overtake_count,
+            "urban_no_overtake_wyn_base_total": len(wyn_base_overtake),
+        }
+
+    # -------------------------------------------------------------------------
     # Chạy toàn bộ
     # -------------------------------------------------------------------------
     def run_alerts_only(self) -> bool:
@@ -692,6 +912,8 @@ class SpeedMapValidator:
         self.validate_cameras()
         self.validate_signs()
         self.validate_near_duplicates()
+        if self.osm_path:
+            self.validate_osm_gates()
         return len(self.errors) == 0
 
     def run_all(self) -> bool:
@@ -705,6 +927,8 @@ class SpeedMapValidator:
         self.validate_near_duplicates()
         if self.sounds_ref_dir:
             self.validate_sounds()
+        if self.osm_path:
+            self.validate_osm_gates()
         return len(self.errors) == 0
 
     def print_summary(self):
@@ -755,6 +979,7 @@ def main():
     parser.add_argument("--sample-size", type=int, default=5000, help="Số segment mẫu kiểm tra trong tiles.bin")
     parser.add_argument("--sounds-ref", type=Path, default=None, help="Thư mục tham chiếu âm thanh gốc (ví dụ: speedmap/sounds)")
     parser.add_argument("--prev", type=Path, default=None, help="Thư mục speedmap của bản trước để so sánh tỷ lệ biển tốc độ 0")
+    parser.add_argument("--osm", type=Path, default=None, help="Đường dẫn file osm_ground_truth.json để kiểm tra các cổng chất lượng OSM")
     parser.add_argument("--alerts-only", action="store_true", help="Chỉ kiểm định cameras.bin và signs.bin (dành cho gói alerts)")
 
     args = parser.parse_args()
@@ -769,6 +994,7 @@ def main():
         sample_size=args.sample_size,
         sounds_ref_dir=args.sounds_ref,
         prev_dir=args.prev,
+        osm_path=args.osm,
     )
     if args.alerts_only:
         passed = validator.run_alerts_only()

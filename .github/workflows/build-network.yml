@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PBF_URL: https://download.geofabrik.de/asia/vietnam-latest.osm.pbf
+  PBF_URL: https://download.geofabrik.de/asia/vietnam/vietnam-latest.osm.pbf
   VIETHUD_REPO: https://github.com/911273/VietHUD.git
   VIETHUD_REF: 1f1f986          # pinned pipeline version (bump deliberately)
 
@@ -37,10 +37,14 @@ jobs:
 
       - name: Download OSM Vietnam (verify md5)
         run: |
-          curl -fsSL -o vietnam.osm.pbf "$PBF_URL"
-          curl -fsSL "$PBF_URL.md5" | awk '{print $1"  vietnam.osm.pbf"}' > pbf.md5
+          # Geofabrik redirects *-latest to a dated file (e.g. asia/vietnam/vietnam-YYMMDD.osm.pbf);
+          # resolve it once so the data, its .md5 and the date all refer to the same file.
+          REAL_URL=$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$PBF_URL")
+          echo "Resolved: $REAL_URL"
+          curl -fsSL -o vietnam.osm.pbf "$REAL_URL"
+          curl -fsSL "$REAL_URL.md5" | awk '{print $1"  vietnam.osm.pbf"}' > pbf.md5
           md5sum -c pbf.md5
-          echo "OSM_DATE=$(curl -fsSIL "$PBF_URL" | awk -F': ' 'tolower($1)=="last-modified"{print $2}' | tail -1 | tr -d '\r')" >> "$GITHUB_ENV"
+          echo "OSM_DATE=$(curl -fsSI "$REAL_URL" | awk -F': ' 'tolower($1)=="last-modified"{print $2}' | tail -1 | tr -d '\r')" >> "$GITHUB_ENV"
 
       - name: Skip if OSM unchanged since last release
         id: check

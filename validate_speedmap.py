@@ -803,23 +803,29 @@ class SpeedMapValidator:
 
         # Cổng 4: camera nguồn VietMap trong nội đô HN/HCM >= 85% có đèn OSM <= 40 m
         # In thêm tỷ lệ của Base/WYN dạng THÔNG TIN
-        urban_cams_vm = [p for p in cam_points if p[2] == "VietMap" and is_in_core_urban(p[0], p[1])]
-        urban_cams_near_signals = sum(1 for lat, lon, _ in urban_cams_vm if has_nearby(lat, lon, signal_grid, 40.0))
-        urban_cam_ratio = (urban_cams_near_signals / len(urban_cams_vm)) if urban_cams_vm else 1.0
-        print(f"[INFO] [{sec}] Cổng 4 (Camera VietMap nội đô <= 40m đèn OSM): {urban_cam_ratio*100:.2f}% ({urban_cams_near_signals}/{len(urban_cams_vm)}) - Ngưỡng >= 85%")
+        if not cam_sources:
+            print(f"[INFO] [{sec}] Cổng 4 (THÔNG TIN): bỏ qua cổng 4: không có dữ liệu nguồn camera")
+            urban_cam_ratio = None
+            urban_cams_near_signals = 0
+            urban_cams_vm = []
+        else:
+            urban_cams_vm = [p for p in cam_points if p[2] == "VietMap" and is_in_core_urban(p[0], p[1])]
+            urban_cams_near_signals = sum(1 for lat, lon, _ in urban_cams_vm if has_nearby(lat, lon, signal_grid, 40.0))
+            urban_cam_ratio = (urban_cams_near_signals / len(urban_cams_vm)) if urban_cams_vm else 1.0
+            print(f"[INFO] [{sec}] Cổng 4 (Camera VietMap nội đô <= 40m đèn OSM): {urban_cam_ratio*100:.2f}% ({urban_cams_near_signals}/{len(urban_cams_vm)}) - Ngưỡng >= 85%")
 
-        urban_cams_wyn = [p for p in cam_points if p[2] == "WYN" and is_in_core_urban(p[0], p[1])]
-        if urban_cams_wyn:
-            wyn_near = sum(1 for lat, lon, _ in urban_cams_wyn if has_nearby(lat, lon, signal_grid, 40.0))
-            print(f"[INFO] [{sec}] Cổng 4 (THÔNG TIN) Camera WYN nội đô <= 40m đèn OSM: {wyn_near/len(urban_cams_wyn)*100:.2f}% ({wyn_near}/{len(urban_cams_wyn)})")
+            urban_cams_wyn = [p for p in cam_points if p[2] == "WYN" and is_in_core_urban(p[0], p[1])]
+            if urban_cams_wyn:
+                wyn_near = sum(1 for lat, lon, _ in urban_cams_wyn if has_nearby(lat, lon, signal_grid, 40.0))
+                print(f"[INFO] [{sec}] Cổng 4 (THÔNG TIN) Camera WYN nội đô <= 40m đèn OSM: {wyn_near/len(urban_cams_wyn)*100:.2f}% ({wyn_near}/{len(urban_cams_wyn)})")
 
-        urban_cams_base = [p for p in cam_points if p[2] == "Base" and is_in_core_urban(p[0], p[1])]
-        if urban_cams_base:
-            base_near = sum(1 for lat, lon, _ in urban_cams_base if has_nearby(lat, lon, signal_grid, 40.0))
-            print(f"[INFO] [{sec}] Cổng 4 (THÔNG TIN) Camera Base nội đô <= 40m đèn OSM: {base_near/len(urban_cams_base)*100:.2f}% ({base_near}/{len(urban_cams_base)})")
+            urban_cams_base = [p for p in cam_points if p[2] == "Base" and is_in_core_urban(p[0], p[1])]
+            if urban_cams_base:
+                base_near = sum(1 for lat, lon, _ in urban_cams_base if has_nearby(lat, lon, signal_grid, 40.0))
+                print(f"[INFO] [{sec}] Cổng 4 (THÔNG TIN) Camera Base nội đô <= 40m đèn OSM: {base_near/len(urban_cams_base)*100:.2f}% ({base_near}/{len(urban_cams_base)})")
 
-        if urban_cams_vm and urban_cam_ratio < 0.85:
-            self.add_error(sec, f"Cổng kiểm định camera VietMap nội đô gần đèn OSM không đạt: {urban_cam_ratio*100:.2f}% < ngưỡng 85.0% ({urban_cams_near_signals}/{len(urban_cams_vm)})")
+            if urban_cams_vm and urban_cam_ratio < 0.85:
+                self.add_error(sec, f"Cổng kiểm định camera VietMap nội đô gần đèn OSM không đạt: {urban_cam_ratio*100:.2f}% < ngưỡng 85.0% ({urban_cams_near_signals}/{len(urban_cams_vm)})")
 
         # Cổng 5: sign 6 nguồn VietMap trong nội đô HN >= 60% có đèn OSM <= 40 m
         def is_in_core_hn(lat: float, lon: float) -> bool:
@@ -888,7 +894,7 @@ class SpeedMapValidator:
             "tunnel_gate_ratio": round(tunnel_ratio, 4),
             "tunnel_near_osm": tunnel_near_osm,
             "tunnel_total": len(tunnel_signs),
-            "urban_camera_signal_ratio": round(urban_cam_ratio, 4),
+            "urban_camera_signal_ratio": round(urban_cam_ratio, 4) if urban_cam_ratio is not None else None,
             "urban_cameras_near_signals": urban_cams_near_signals,
             "urban_cameras_total": len(urban_cams_vm),
             "vm_traffic_light_urban_ratio": round(vm_light_ratio, 4),

@@ -323,6 +323,34 @@ class TestValidateSpeedmap(unittest.TestCase):
         self.assertTrue(passed)
         self.assertFalse(any("thay đổi quá ±5 điểm %" in w for w in validator.warnings))
 
+    def test_gate_4_skipped_without_csv(self):
+        """Cổng 4: khi không có combined_traffic_alerts.csv, bỏ qua cổng 4 và không báo lỗi."""
+        import json
+        ds_dir = self.td / "ds_no_csv"
+        make_valid_speedmap_dataset(ds_dir)
+
+        # Tạo file osm_ground_truth.json giả
+        osm_json = self.td / "osm_gt.json"
+        osm_json.write_text(json.dumps({
+            "toll_booths": [],
+            "traffic_signals": [[21.030000, 105.850000]],
+            "tunnel_portals": [],
+        }), encoding="utf-8")
+
+        # Camera ở vị trí nội đô xa đèn (21.0500, 105.8200)
+        cam_bytes = struct.pack(vsm.CAMERA_FMT, 1, int(21.0500 * 1e7), int(105.8200 * 1e7), 60, 45)
+        (ds_dir / "cameras.bin").write_bytes(cam_bytes)
+
+        # Đảm bảo không có combined_traffic_alerts.csv
+        csv_file = ds_dir / "combined_traffic_alerts.csv"
+        if csv_file.exists():
+            csv_file.unlink()
+
+        validator = vsm.SpeedMapValidator(ds_dir, osm_path=osm_json)
+        validator.validate_osm_gates()
+        self.assertEqual(len(validator.errors), 0, "Không có CSV thì bỏ qua cổng 4, KHÔNG báo lỗi")
+        self.assertIsNone(validator.section_results["osm_gates"]["details"]["urban_camera_signal_ratio"])
+
 
 if __name__ == "__main__":
     unittest.main()

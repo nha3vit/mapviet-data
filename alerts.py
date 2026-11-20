@@ -841,6 +841,7 @@ def deduplicate_points(
 def merge_and_deduplicate(
     all_candidates: list[AlertPoint],
     osm_signals: list[tuple[float, float]] | list[list[float]] | None = None,
+    osm_signal_source: str | None = None,
 ) -> tuple[list[AlertPoint], dict]:
     """
     Hợp nhất và khử trùng lặp theo quy chuẩn R3/R5b/R5c:
@@ -858,7 +859,12 @@ def merge_and_deduplicate(
     # Bước 1: Làm sạch heading giả (kế hoạch 1.F)
     bogus_headings, bogus_report_only = clean_bogus_headings(all_candidates)
 
+    if osm_signal_source is None:
+        osm_signal_source = "osm_ground_truth.json" if osm_signals else "none"
+
     stats = {
+        "a1_osm_signal_source": osm_signal_source,
+        "a1_osm_signal_count": len(osm_signals) if osm_signals else 0,
         "vietmap_kept": 0,
         "wyn_kept": 0,
         "base_kept": 0,
@@ -1363,6 +1369,7 @@ def export_binary_files(
     base_timestamp: int = 0,
     vietmap_version: str = "Unknown",
     stats_merge: dict | None = None,
+    version: str | None = None,
 ) -> tuple[Path, Path, Path, Path]:
     """Xuất cameras.bin, signs.bin, combined_traffic_alerts.csv, stats.json."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1508,6 +1515,9 @@ def export_binary_files(
     same_dir_stats = measure_same_direction_cameras(cameras, same_dir_md)
 
     stats_dict = {
+        "version": version if version is not None else (stats_merge or {}).get("version", ""),
+        "a1_osm_signal_source": (stats_merge or {}).get("a1_osm_signal_source", "none"),
+        "a1_osm_signal_count": (stats_merge or {}).get("a1_osm_signal_count", 0),
         "cameras_count": len(cameras),
         "signs_count": len(signs),
         "total_points": len(master_points),
@@ -1679,6 +1689,7 @@ def main():
         base_ts = b_ts
 
     # 4. Nạp OSM Signs (đèn và trạm thu phí)
+    osm_points = []
     if args.osm_signs and args.osm_signs.exists():
         osm_points = load_osm_signs(args.osm_signs)
         all_candidates.extend(osm_points)
@@ -1691,20 +1702,40 @@ def main():
         sys.exit(1)
 
     osm_signals = []
+    a1_osm_signal_source = "none"
+
     if args.osm_ground_truth and args.osm_ground_truth.exists():
         try:
             with open(args.osm_ground_truth, "r", encoding="utf-8") as f:
                 osm_gt = json.load(f)
                 osm_signals = osm_gt.get("traffic_signals", [])
-            print(f"[*] Đã nạp {len(osm_signals):,} đèn tín hiệu OSM từ {args.osm_ground_truth} (phục vụ A1)")
+            a1_osm_signal_source = "osm_ground_truth.json"
+            print(f"[A1] nguồn đèn OSM: osm_ground_truth.json ({len(osm_signals):,})")
         except Exception as e:
             print(f"[CANH BAO] Không thể đọc file OSM ground truth {args.osm_ground_truth}: {e}")
+            osm_signals = []
+
+    if a1_osm_signal_source == "none" and args.osm_signs and args.osm_signs.exists():
+        if not osm_points:
+            osm_points = load_osm_signs(args.osm_signs)
+        osm_signals = [[p.lat, p.lon] for p in osm_points if p.sign_type == SIGN_TYPE_TRAFFIC_LIGHT]
+        a1_osm_signal_source = "osm_signs.bin"
+        print(f"[A1] nguồn đèn OSM: osm_signs.bin ({len(osm_signals):,})")
+
+    if a1_osm_signal_source == "none":
+        print("[A1] KHÔNG CÓ nguồn đèn OSM")
 
     # Khử trùng lặp
-    master_points, stats = merge_and_deduplicate(all_candidates, osm_signals=osm_signals)
+    master_points, stats = merge_and_deduplicate(
+        all_candidates,
+        osm_signals=osm_signals,
+        osm_signal_source=a1_osm_signal_source,
+    )
 
     # Gán ID ổn định
     allocate_stable_ids(master_points)
+
+    ver = args.version or time.strftime("%Y.%m.%d.%H%M")
 
     # Xuất file nhị phân
     cams_path, signs_path, csv_path, stats_path = export_binary_files(
@@ -1713,10 +1744,10 @@ def main():
         base_timestamp=base_ts,
         vietmap_version=vm_version,
         stats_merge=stats,
+        version=args.version or "",
     )
 
     # Sinh manifest & ký
-    ver = args.version or time.strftime("%Y.%m.%d.%H%M")
     write_manifest(args.out, version=ver, no_sign=args.no_sign)
 
 

@@ -6,9 +6,11 @@ if str(_REPO_DIR) not in sys.path:
     sys.path.insert(0, str(_REPO_DIR))
 
 import csv
+import json
 import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -309,6 +311,117 @@ class TestAlerts(unittest.TestCase):
         self.assertEqual(c[0].speed_limit, 60)
         self.assertEqual(len(s), 1)
         self.assertEqual(s[0].sign_type, 6)
+
+    def test_a1_osm_signs_fallback(self):
+        """Bước 1 (R5d): A1 lấy đèn OSM từ osm_signs.bin khi không có osm_ground_truth.json."""
+        from unittest.mock import patch
+
+        # 1. Tạo osm_signs.bin tổng hợp có 1 đèn type 6 tại (21.300000, 105.500000) (ngoại thành)
+        osm_bin = self.td / "osm_signs.bin"
+        lat_light, lon_light = 21.300000, 105.500000
+        pt_body = struct.pack(
+            alerts.SIGN_POINT_FMT,
+            1,
+            int(round(lat_light * 1e7)),
+            int(round(lon_light * 1e7)),
+            alerts.DIR_OMNI,
+            alerts.SIGN_TYPE_TRAFFIC_LIGHT,
+            0,
+            0,
+            0,
+            alerts.SOURCE_CODE_OSM,
+        )
+        crc = zlib.crc32(pt_body) & 0xFFFFFFFF
+        hdr = struct.pack(alerts.SIGN_HEADER_FMT, b"VNSG", 1, 1, 0, crc, 1700000000)
+        osm_bin.write_bytes(hdr + pt_body)
+
+        # 2. Tạo wyn_points.csv có 1 KDC cách 20m (bị bỏ) và 1 KDC cách 100m (giữ)
+        wyn_csv = self.td / "wyn_kdc.csv"
+        lat_20m = lat_light + (20.0 / 111139.0)
+        lat_100m = lat_light + (100.0 / 111139.0)
+        with open(wyn_csv, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["lat", "lon", "kind", "sign_type", "speed_kmh", "heading", "source"])
+            writer.writeheader()
+            writer.writerow({
+                "lat": f"{lat_20m:.6f}",
+                "lon": f"{lon_light:.6f}",
+                "kind": "sign",
+                "sign_type": "2",
+                "speed_kmh": "0",
+                "heading": "90",
+                "source": "WYN"
+            })
+            writer.writerow({
+                "lat": f"{lat_100m:.6f}",
+                "lon": f"{lon_light:.6f}",
+                "kind": "sign",
+                "sign_type": "2",
+                "speed_kmh": "0",
+                "heading": "90",
+                "source": "WYN"
+            })
+
+        out_dir = self.td / "out_osm_signs_test"
+        cmd = [
+            "alerts.py",
+            "--osm-ground-truth", str(self.td / "khong_ton_tai.json"),
+            "--osm-signs", str(osm_bin),
+            "--wyn", str(wyn_csv),
+            "--out", str(out_dir),
+            "--version", "2026.11.20.9999",
+            "--no-sign",
+        ]
+        with patch("sys.argv", cmd):
+            alerts.main()
+
+        # Kiểm tra stats.json
+        stats_file = out_dir / "stats.json"
+        self.assertTrue(stats_file.exists())
+        stats = json.loads(stats_file.read_text(encoding="utf-8"))
+        self.assertEqual(stats["a1_osm_signal_source"], "osm_signs.bin")
+        self.assertEqual(stats["a1_osm_signal_count"], 1)
+        self.assertEqual(stats["version"], "2026.11.20.9999")
+        self.assertEqual(stats["kdc_at_signal_dropped"], 1)
+
+        # Kiểm tra signs.bin: 1 đèn OSM + 1 KDC cách 100m (KDC cách 20m bị bỏ)
+        sdata = (out_dir / "signs.bin").read_bytes()
+        hdr_size = struct.calcsize(alerts.SIGN_HEADER_FMT)
+        magic, ver, count, reserved, crc, ts = struct.unpack_from(alerts.SIGN_HEADER_FMT, sdata, 0)
+        self.assertEqual(count, 2, "Chỉ giữ 1 đèn OSM và 1 KDC cách 100m (bỏ KDC 20m)")
+
+    def test_a1_no_osm_source_records_none(self):
+        """Bước 1 (R5d): Khi không có cả hai nguồn đèn OSM, ghi stats a1_osm_signal_source = 'none'."""
+        from unittest.mock import patch
+
+        wyn_csv = self.td / "wyn_kdc_only.csv"
+        with open(wyn_csv, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["lat", "lon", "kind", "sign_type", "speed_kmh", "heading", "source"])
+            writer.writeheader()
+            writer.writerow({
+                "lat": "21.300000",
+                "lon": "105.500000",
+                "kind": "sign",
+                "sign_type": "2",
+                "speed_kmh": "0",
+                "heading": "90",
+                "source": "WYN"
+            })
+
+        out_dir = self.td / "out_none_test"
+        cmd = [
+            "alerts.py",
+            "--osm-ground-truth", str(self.td / "khong_ton_tai.json"),
+            "--wyn", str(wyn_csv),
+            "--out", str(out_dir),
+            "--no-sign",
+        ]
+        with patch("sys.argv", cmd):
+            alerts.main()
+
+        stats = json.loads((out_dir / "stats.json").read_text(encoding="utf-8"))
+        self.assertEqual(stats["a1_osm_signal_source"], "none")
+        self.assertEqual(stats["a1_osm_signal_count"], 0)
+        self.assertEqual(stats["version"], "")
 
 
 if __name__ == "__main__":

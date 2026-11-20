@@ -34,6 +34,7 @@ INDEX_ENTRY_FMT = "<IiiiiII"
 SEGMENT_FMT = "<IiiiiHBBhBB"
 SIGN_HEADER_FMT = "<4sHIHII"
 SIGN_POINT_FMT = "<IiiHBBBBH"
+SIGN_TYPE_TOLL_BOOTH = 5
 SIGN_TYPE_TRAFFIC_LIGHT = 6
 
 
@@ -159,7 +160,8 @@ def deduplicate_tiles(src_dir, dst_dir):
 
 
 def extract_lights(signs_path, out_path):
-    data = open(signs_path, "rb").read()
+    with open(signs_path, "rb") as f:
+        data = f.read()
     magic, ver, count, _res, _crc, ts = struct.unpack_from(SIGN_HEADER_FMT, data, 0)
     if magic != b"VNSG":
         raise SystemExit("signs.bin: bad magic")
@@ -169,6 +171,26 @@ def extract_lights(signs_path, out_path):
     for i in range(count):
         rec = data[20 + i * psize: 20 + (i + 1) * psize]
         if rec[14] == SIGN_TYPE_TRAFFIC_LIGHT:  # type byte
+            body += rec
+            n += 1
+    header = struct.pack(SIGN_HEADER_FMT, b"VNSG", ver, n, 0, zlib.crc32(bytes(body)) & 0xFFFFFFFF, ts)
+    with open(out_path, "wb") as f:
+        f.write(header + bytes(body))
+    return n
+
+
+def extract_osm_signs(signs_path, out_path):
+    with open(signs_path, "rb") as f:
+        data = f.read()
+    magic, ver, count, _res, _crc, ts = struct.unpack_from(SIGN_HEADER_FMT, data, 0)
+    if magic != b"VNSG":
+        raise SystemExit("signs.bin: bad magic")
+    psize = struct.calcsize(SIGN_POINT_FMT)
+    body = bytearray()
+    n = 0
+    for i in range(count):
+        rec = data[20 + i * psize: 20 + (i + 1) * psize]
+        if rec[14] in (SIGN_TYPE_TOLL_BOOTH, SIGN_TYPE_TRAFFIC_LIGHT):  # type byte: toll booth (5) or light (6)
             body += rec
             n += 1
     header = struct.pack(SIGN_HEADER_FMT, b"VNSG", ver, n, 0, zlib.crc32(bytes(body)) & 0xFFFFFFFF, ts)
@@ -192,13 +214,15 @@ def main():
     deduplicate_tiles(src, dst)
 
     n_lights = 0
+    n_osm_signs = 0
     signs_src = os.path.join(src, "signs.bin")
     if os.path.exists(signs_src):
         n_lights = extract_lights(signs_src, os.path.join(dst, "lights.bin"))
+        n_osm_signs = extract_osm_signs(signs_src, os.path.join(dst, "osm_signs.bin"))
 
     version = os.environ.get("MAPVIET_NETWORK_VERSION") or time.strftime("%Y.%m.%d.%H%M", time.gmtime())
     lines = [f"version {version}"]
-    for f in NETWORK_FILES + ["lights.bin"]:
+    for f in NETWORK_FILES + ["lights.bin", "osm_signs.bin"]:
         p = os.path.join(dst, f)
         with open(p, "rb") as fi, gzip.open(p + ".gz", "wb", compresslevel=9) as fo:
             shutil.copyfileobj(fi, fo, 1 << 20)
@@ -213,7 +237,7 @@ def main():
                              check=True, capture_output=True).stdout
         with open(manifest + ".sig", "w") as fo:
             fo.write(base64.b64encode(der).decode() + "\n")
-    print(f"pack {version}: {n_lights} OSM traffic lights; signed={bool(key)}")
+    print(f"pack {version}: {n_lights} OSM traffic lights, {n_osm_signs} OSM signs (lights+toll); signed={bool(key)}")
     print(open(manifest).read())
 
 

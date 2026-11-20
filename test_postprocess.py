@@ -10,7 +10,13 @@ from postprocess import (
     INDEX_ENTRY_FMT,
     METADATA_FMT,
     SEGMENT_FMT,
+    SIGN_HEADER_FMT,
+    SIGN_POINT_FMT,
+    SIGN_TYPE_TOLL_BOOTH,
+    SIGN_TYPE_TRAFFIC_LIGHT,
     deduplicate_tiles,
+    extract_lights,
+    extract_osm_signs,
     is_geom_duplicate,
 )
 
@@ -129,6 +135,72 @@ class TestPostprocess(unittest.TestCase):
         self.assertEqual(dst_seg_names[10], 0)  # bị xoá về 0
         self.assertEqual(dst_seg_names[20], 0)  # bị xoá về 0
         self.assertEqual(dst_seg_names[30], 130)
+
+    def test_extract_lights_and_osm_signs(self):
+        # Tạo mock signs.bin chứa nhiều loại biển:
+        # sign1: type 1 (tốc độ)
+        # sign2: type 5 (trạm thu phí)
+        # sign3: type 6 (đèn giao thông)
+        # sign4: type 2 (khu dân cư)
+        # sign5: type 6 (đèn giao thông thứ 2)
+        ts = 1732000000
+        signs = [
+            (1, 210000000, 1058000000, 90, 1, 60, 0, 0, 0),
+            (2, 210001000, 105801000, 0xFFFF, SIGN_TYPE_TOLL_BOOTH, 0, 0, 0, 0),
+            (3, 210002000, 105802000, 180, SIGN_TYPE_TRAFFIC_LIGHT, 0, 0, 0, 0),
+            (4, 210003000, 105803000, 0, 2, 0, 0, 0, 0),
+            (5, 210004000, 105804000, 270, SIGN_TYPE_TRAFFIC_LIGHT, 0, 0, 0, 0),
+        ]
+        body = bytearray()
+        for s in signs:
+            body.extend(struct.pack(SIGN_POINT_FMT, *s))
+
+        header = struct.pack(SIGN_HEADER_FMT, b"VNSG", 1, len(signs), 0, zlib.crc32(bytes(body)) & 0xFFFFFFFF, ts)
+        signs_path = os.path.join(self.src_dir, "signs.bin")
+        with open(signs_path, "wb") as f:
+            f.write(header + bytes(body))
+
+        lights_path = os.path.join(self.dst_dir, "lights.bin")
+        osm_signs_path = os.path.join(self.dst_dir, "osm_signs.bin")
+
+        # 1. Kiểm tra extract_lights
+        n_lights = extract_lights(signs_path, lights_path)
+        self.assertEqual(n_lights, 2)
+        with open(lights_path, "rb") as f:
+            ldata = f.read()
+        l_magic, l_ver, l_cnt, _, l_crc, l_ts = struct.unpack_from(SIGN_HEADER_FMT, ldata, 0)
+        self.assertEqual(l_magic, b"VNSG")
+        self.assertEqual(l_ver, 1)
+        self.assertEqual(l_cnt, 2)
+        self.assertEqual(l_ts, ts)
+        self.assertEqual(zlib.crc32(ldata[20:]) & 0xFFFFFFFF, l_crc)
+        p1 = struct.unpack_from(SIGN_POINT_FMT, ldata, 20)
+        p2 = struct.unpack_from(SIGN_POINT_FMT, ldata, 40)
+        self.assertEqual(p1[0], 3)
+        self.assertEqual(p1[4], SIGN_TYPE_TRAFFIC_LIGHT)
+        self.assertEqual(p2[0], 5)
+        self.assertEqual(p2[4], SIGN_TYPE_TRAFFIC_LIGHT)
+
+        # 2. Kiểm tra extract_osm_signs (gồm đèn 6 và trạm thu phí 5)
+        n_osm = extract_osm_signs(signs_path, osm_signs_path)
+        self.assertEqual(n_osm, 3)
+        with open(osm_signs_path, "rb") as f:
+            odata = f.read()
+        o_magic, o_ver, o_cnt, _, o_crc, o_ts = struct.unpack_from(SIGN_HEADER_FMT, odata, 0)
+        self.assertEqual(o_magic, b"VNSG")
+        self.assertEqual(o_ver, 1)
+        self.assertEqual(o_cnt, 3)
+        self.assertEqual(o_ts, ts)
+        self.assertEqual(zlib.crc32(odata[20:]) & 0xFFFFFFFF, o_crc)
+        op1 = struct.unpack_from(SIGN_POINT_FMT, odata, 20)
+        op2 = struct.unpack_from(SIGN_POINT_FMT, odata, 40)
+        op3 = struct.unpack_from(SIGN_POINT_FMT, odata, 60)
+        self.assertEqual(op1[0], 2)
+        self.assertEqual(op1[4], SIGN_TYPE_TOLL_BOOTH)
+        self.assertEqual(op2[0], 3)
+        self.assertEqual(op2[4], SIGN_TYPE_TRAFFIC_LIGHT)
+        self.assertEqual(op3[0], 5)
+        self.assertEqual(op3[4], SIGN_TYPE_TRAFFIC_LIGHT)
 
 
 if __name__ == "__main__":

@@ -79,11 +79,13 @@ DIR_OMNI = 0xFFFF  # Không rõ hướng
 PRIORITY_VIETMAP = 1
 PRIORITY_WYN     = 2
 PRIORITY_BASE    = 3
+PRIORITY_OSM     = 4
 
 # Mã nguồn trong trường reserved của signs.bin
 SOURCE_CODE_BASE    = 0
 SOURCE_CODE_VIETMAP = 1
 SOURCE_CODE_WYN     = 2
+SOURCE_CODE_OSM     = 3
 
 # Định dạng nhị phân VietHUD
 # struct CameraPoint: <QiihH (20 bytes)
@@ -546,6 +548,52 @@ def load_base_alerts(base_dir: Path) -> tuple[list[AlertPoint], int]:
     return points, base_timestamp
 
 
+def load_osm_signs(osm_signs_path: str | Path | None) -> list[AlertPoint]:
+    """Nạp dữ liệu đèn (6) và trạm thu phí (5) từ osm_signs.bin (VNSG format do postprocess xuất từ OSM build)."""
+    if not osm_signs_path:
+        return []
+    p = Path(osm_signs_path)
+    if not p.exists():
+        print(f"      -> Không tìm thấy tệp osm_signs.bin tại: {p}")
+        return []
+    sdata = p.read_bytes()
+    hdr_size = struct.calcsize(SIGN_HEADER_FMT)
+    if len(sdata) < hdr_size:
+        raise SystemExit(f"{p}: tệp quá ngắn")
+    magic, ver, count, reserved, crc, ts = struct.unpack_from(SIGN_HEADER_FMT, sdata, 0)
+    if magic != b"VNSG":
+        raise SystemExit(f"{p}: bad magic {magic}")
+    point_size = struct.calcsize(SIGN_POINT_FMT)
+    points = []
+    for i in range(count):
+        sid, lat_e7, lon_e7, heading, stype, speed, sub_type, flags, sres = struct.unpack_from(
+            SIGN_POINT_FMT, sdata, hdr_size + i * point_size
+        )
+        lat = lat_e7 / 1e7
+        lon = lon_e7 / 1e7
+        if not (LAT_MIN <= lat <= LAT_MAX and LON_MIN <= lon <= LON_MAX):
+            continue
+        hd = heading if is_heading_known(heading, "OSM") else DIR_OMNI
+        k = "light" if stype == SIGN_TYPE_TRAFFIC_LIGHT else "sign"
+        points.append(AlertPoint(
+            lat=lat,
+            lon=lon,
+            sign_type=stype,
+            speed_limit=0,
+            heading=hd,
+            is_camera=False,
+            source="OSM",
+            priority=PRIORITY_OSM,
+            desc=f"OSM Sign {stype}",
+            kind=k,
+            sub_type=sub_type,
+            flags=flags,
+            original_id=sid,
+        ))
+    print(f"      -> Nạp được: {len(points):,} biển/đèn OSM (nguồn OSM, priority={PRIORITY_OSM})")
+    return points
+
+
 def clean_bogus_headings(points: list[AlertPoint]) -> tuple[list[dict], list[dict]]:
     """
     Bước 3 (kế hoạch 1.F) — Phát hiện và làm sạch heading giả:
@@ -555,13 +603,13 @@ def clean_bogus_headings(points: list[AlertPoint]) -> tuple[list[dict], list[dic
     - Áp dụng:
       + WYN: sửa heading thành DIR_OMNI (0xFFFF)
       + VietMap: CHỈ ghi vào stats.json (bogus_headings_report_only), KHÔNG SỬA (D2)
-      + Nền Base: không xét.
+      + Nền Base, OSM: không xét.
     """
     bogus_list = []
     report_only_list = []
     groups = defaultdict(list)
     for p in points:
-        if p.source != "Base":
+        if p.source in ("WYN", "VietMap"):
             if p.is_camera:
                 grp_kind = "camera"
             elif p.sign_type == SIGN_TYPE_TRAFFIC_LIGHT:
@@ -730,6 +778,7 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
         "vietmap_kept": 0,
         "wyn_kept": 0,
         "base_kept": 0,
+        "osm_kept": 0,
         "noise_dropped": 0,
         "inherited_speed": 0,
         "inherited_heading": 0,
@@ -738,6 +787,7 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
         "sign_type_4_dropped_duplicate": 0,
         "sign_type_4_converted_to_camera": 0,
         "base_speed_sign_zero_dropped": GLOBAL_DROP_STATS["base_speed_sign_zero_dropped"],
+        "base_end_sign_conflict_vietmap_dropped": 0,
         "speed_sign_invalid_dropped": GLOBAL_DROP_STATS["speed_sign_invalid_dropped"],
         "vietmap_type8_heading_zero_as_unknown": GLOBAL_DROP_STATS.get("vietmap_type8_heading_zero_as_unknown", 0),
         "dropped_by_source_pair": defaultdict(Counter),
@@ -802,6 +852,33 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
         stats_counter=stats,
     )
 
+    # 3b. Bỏ biển "hết hạn chế" (loại 1 tốc độ 0) của nguồn nền mâu thuẫn với biển số VietMap (Kế hoạch G1 - Mục 19.1)
+    vm_speed_signs = [p for p in master_signs if p.source == "VietMap" and not p.is_camera and p.sign_type == SIGN_TYPE_SPEED_LIMIT and p.speed_limit > 0]
+    vm_speed_index = SpatialAlertIndex(cell_deg=0.0005)
+    for idx, vm in enumerate(vm_speed_signs):
+        vm_speed_index.insert(idx, vm)
+
+    filtered_signs = []
+    base_end_conflicts = 0
+    for s in master_signs:
+        if s.source == "Base" and not s.is_camera and s.sign_type == SIGN_TYPE_SPEED_LIMIT and s.speed_limit == 0:
+            nearby_vm = vm_speed_index.find_nearby(s, vm_speed_signs, radius_m=50.0)
+            is_conflicted = False
+            for dist, vm_idx, vm in nearby_vm:
+                s_known = is_heading_known(s.heading, s.source)
+                vm_known = is_heading_known(vm.heading, vm.source)
+                if not s_known or not vm_known or heading_diff(s.heading, vm.heading) <= 45.0:
+                    is_conflicted = True
+                    break
+            if is_conflicted:
+                base_end_conflicts += 1
+                stats["noise_dropped"] += 1
+                stats["dropped_by_source_pair"]["Base->VietMap"]["sign_1_speed_0_conflict"] += 1
+                continue
+        filtered_signs.append(s)
+    master_signs = filtered_signs
+    stats["base_end_sign_conflict_vietmap_dropped"] = base_end_conflicts
+
     # Tổng hợp danh sách master
     master_points = master_cameras + master_signs
 
@@ -810,6 +887,10 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
             stats["vietmap_kept"] += 1
         elif p.priority == PRIORITY_WYN:
             stats["wyn_kept"] += 1
+        elif p.priority == PRIORITY_BASE:
+            stats["base_kept"] += 1
+        elif p.priority == PRIORITY_OSM:
+            stats["osm_kept"] += 1
         else:
             stats["base_kept"] += 1
 
@@ -873,11 +954,13 @@ def merge_and_deduplicate(all_candidates: list[AlertPoint]) -> tuple[list[AlertP
     print(f"     + Điểm VietMap giữ lại:   {stats['vietmap_kept']:,}")
     print(f"     + Điểm WYN giữ lại:       {stats['wyn_kept']:,}")
     print(f"     + Điểm nền Base giữ lại:  {stats['base_kept']:,}")
+    print(f"     + Điểm OSM giữ lại:       {stats['osm_kept']:,}")
     print(f"     = TỔNG ĐIỂM SAU HỢP NHẤT: {len(master_points):,}")
     print(f"     - Số điểm trùng đã loại:  {stats['noise_dropped']:,}")
     print(f"     * Số kế thừa tốc độ:      {stats['inherited_speed']:,}")
     print(f"     * Số kế thừa hướng:       {stats['inherited_heading']:,}")
     print(f"     ! Biển loại 1 nền tốc độ 0 bỏ: {stats['base_speed_sign_zero_dropped']:,}")
+    print(f"     ! Biển loại 1 nền tốc độ 0 mâu thuẫn VietMap bỏ: {stats['base_end_sign_conflict_vietmap_dropped']:,}")
     print(f"     ! Biển loại 1 tốc độ sai chuẩn bỏ: {stats['speed_sign_invalid_dropped']:,}")
     print(f"     ! VietMap type 8 chuyển hướng về 0xFFFF: {stats['vietmap_type8_heading_zero_as_unknown']:,}")
     print(f"     ! Sign type 4 bỏ do trùng:{stats['sign_type_4_dropped_duplicate']:,}")
@@ -1134,11 +1217,15 @@ def export_binary_files(
         # Chỉ sign_type 1 có speed
         spd = p.speed_limit if stype == SIGN_TYPE_SPEED_LIMIT and (p.speed_limit == 0 or is_valid_speed_value(p.speed_limit)) else 0
 
-        # Reserved: 0 nền, 1 VietMap, 2 WYN
+        # Reserved: 0 nền, 1 VietMap, 2 WYN, 3 OSM
         if p.priority == PRIORITY_BASE:
             res_val = SOURCE_CODE_BASE
         elif p.priority == PRIORITY_VIETMAP:
             res_val = SOURCE_CODE_VIETMAP
+        elif p.priority == PRIORITY_WYN:
+            res_val = SOURCE_CODE_WYN
+        elif p.priority == PRIORITY_OSM or p.source == "OSM":
+            res_val = SOURCE_CODE_OSM
         else:
             res_val = SOURCE_CODE_WYN
 
@@ -1238,6 +1325,7 @@ def export_binary_files(
         "sign_type_4_dropped_duplicate": (stats_merge or {}).get("sign_type_4_dropped_duplicate", 0),
         "sign_type_4_converted_to_camera": (stats_merge or {}).get("sign_type_4_converted_to_camera", 0),
         "base_speed_sign_zero_dropped": (stats_merge or {}).get("base_speed_sign_zero_dropped", 0),
+        "base_end_sign_conflict_vietmap_dropped": (stats_merge or {}).get("base_end_sign_conflict_vietmap_dropped", 0),
         "speed_sign_invalid_dropped": (stats_merge or {}).get("speed_sign_invalid_dropped", 0),
         "vietmap_type8_heading_zero_as_unknown": (stats_merge or {}).get("vietmap_type8_heading_zero_as_unknown", 0),
         "dropped_by_source_pair": (stats_merge or {}).get("dropped_by_source_pair", {}),
@@ -1330,6 +1418,8 @@ def main():
                         help="Đường dẫn file wyn_points.csv của WYN")
     parser.add_argument("--base", type=Path, default=None,
                         help="Thư mục chứa dữ liệu nền cameras.bin và signs.bin")
+    parser.add_argument("--osm-signs", type=Path, default=None,
+                        help="Đường dẫn file osm_signs.bin chứa đèn (6) và trạm thu phí (5) từ mạng đường OSM")
     parser.add_argument("--out", type=Path, required=True,
                         help="Thư mục xuất kết quả")
     parser.add_argument("--version", type=str, default=None,
@@ -1361,6 +1451,11 @@ def main():
         base_points, b_ts = load_base_alerts(args.base)
         all_candidates.extend(base_points)
         base_ts = b_ts
+
+    # 4. Nạp OSM Signs (đèn và trạm thu phí)
+    if args.osm_signs and args.osm_signs.exists():
+        osm_points = load_osm_signs(args.osm_signs)
+        all_candidates.extend(osm_points)
 
     if args.timestamp is not None:
         base_ts = args.timestamp

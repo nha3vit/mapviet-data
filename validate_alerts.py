@@ -136,8 +136,8 @@ def validate_alerts_dir(alerts_dir: Path, vietmap_path: Path | None = None) -> l
     invalid_speed_signs = 0
     for i in range(count):
         sid, lat_e7, lon_e7, hd, stype, spd, sub, flg, sres = struct.unpack_from(SIGN_POINT_FMT, body, i * 20)
-        # sres: 0 Base, 1 VietMap, 2 WYN
-        src = id_to_source.get(sid, ("VietMap" if sres == 1 else ("WYN" if sres == 2 else "Base")))
+        # sres: 0 Base, 1 VietMap, 2 WYN, 3 OSM
+        src = id_to_source.get(sid, ("VietMap" if sres == 1 else ("WYN" if sres == 2 else ("OSM" if sres == 3 else "Base"))))
         sign_info = {
             "id": sid, "lat_e7": lat_e7, "lon_e7": lon_e7,
             "lat": lat_e7 / 1e7, "lon": lon_e7 / 1e7,

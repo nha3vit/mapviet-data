@@ -33,6 +33,7 @@ concurrency:
 
 env:
   VIETHUD_SPEEDMAP: https://raw.githubusercontent.com/911273/VietHUD/main/speedmap
+  ROAD_NETWORK_URL: https://github.com/nha3vit/mapviet-data/releases/latest/download
   RELEASE_TAG: alerts
 
 jobs:
@@ -66,6 +67,14 @@ jobs:
         run: |
           python verify_viethud.py vh
 
+      - name: Download & verify OSM signs from latest road network
+        run: |
+          mkdir -p road_net
+          for f in manifest.txt manifest.txt.sig osm_signs.bin.gz; do
+            curl -fsSL --retry 3 -o "road_net/$f" "$ROAD_NETWORK_URL/$f"
+          done
+          python verify_road_signs.py road_net
+
       - name: Merge + de-duplicate + sign
         env:
           MAPVIET_SIGNING_KEY: ${{ secrets.MAPVIET_SIGNING_KEY }}
@@ -74,7 +83,7 @@ jobs:
           printf '%s\n' "$MAPVIET_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
           export MAPVIET_SIGNING_KEY_FILE="$RUNNER_TEMP/key.pem"
           export MAPVIET_ALERTS_VERSION="$(date -u +%Y.%m.%d.%H%M)"
-          python alerts.py --base vh --vietmap sources/vietmap/secrect.bin --wyn sources/wyn/wyn_points.csv --out alerts_out --version "$MAPVIET_ALERTS_VERSION"
+          python alerts.py --base vh --vietmap sources/vietmap/secrect.bin --wyn sources/wyn/wyn_points.csv --osm-signs road_net/osm_signs.bin --out alerts_out --version "$MAPVIET_ALERTS_VERSION"
           rm -f "$RUNNER_TEMP/key.pem"
           test -s alerts_out/manifest.txt.sig
           echo "CONTENT_SHA=$(python -c 'import json;print(json.load(open("alerts_out/stats.json"))["content_sha256"])')" >> "$GITHUB_ENV"
@@ -106,15 +115,16 @@ jobs:
           vm_k = s.get("deduplication_stats", {}).get("vietmap_kept", s.get("vietmap_out", 0))
           wyn_k = s.get("deduplication_stats", {}).get("wyn_kept", 0)
           base_k = s.get("deduplication_stats", {}).get("base_kept", 0)
+          osm_k = s.get("deduplication_stats", {}).get("osm_kept", 0)
           src_counts = s.get("counts_by_source_and_type", {})
           vm_cams = src_counts.get("VietMap", {}).get("camera", 0)
           wyn_cams = src_counts.get("WYN", {}).get("camera", 0)
           base_cams = src_counts.get("Base", {}).get("camera", 0)
 
-          print("MapViet alert pack: VietHUD speedmap + VietMap + WYN points, de-duplicated (Chuẩn R4).")
+          print("MapViet alert pack: VietHUD speedmap + VietMap + WYN + OSM points, de-duplicated (Chuẩn R4).")
           print(f"version: {s.get('version', '')}")
           print(f"vietmap_version: {s.get('vietmap_version', '')}")
-          print(f"total_points: {s.get('total_points', 0)} (VietMap {vm_k:,} + WYN {wyn_k:,} + Base {base_k:,})")
+          print(f"total_points: {s.get('total_points', 0)} (VietMap {vm_k:,} + WYN {wyn_k:,} + Base {base_k:,} + OSM {osm_k:,})")
           print(f"cameras: {s.get('cameras_count', 0)} (VietMap {vm_cams:,} + WYN {wyn_cams:,} + Base {base_cams:,})")
           print(f"signs: {s.get('signs_count', 0)}")
           print("Dữ liệu VietMap © VietMap; dữ liệu WYN — cảm ơn WYN.")

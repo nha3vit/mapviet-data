@@ -1,0 +1,66 @@
+# Copy this file to <owner>/mapviet-data : .github/workflows/update-vietmap.yml
+# Tự động thăm dò và cập nhật dữ liệu cảnh báo VietMap SpeedMap M2 hàng tháng.
+# Chạy hằng ngày lúc 01:00 UTC (08:00 Việt Nam, trước build-alerts 09:00) hoặc chạy thủ công.
+name: update-vietmap
+
+on:
+  schedule:
+    - cron: "0 1 * * *"      # 08:00 Vietnam time
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Bắt buộc tải lại và cập nhật dù manifest không đổi"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: update-vietmap
+  cancel-in-progress: false
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Unit tests
+        run: |
+          python -m unittest tests/test_fetch_vietmap.py -v
+
+      - name: Check and fetch VietMap SpeedMap update
+        id: fetch
+        run: |
+          FORCE_FLAG=""
+          if [ "${{ inputs.force }}" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          python fetch_vietmap.py --dest-dir sources/vietmap $FORCE_FLAG
+
+      - name: Commit and push update
+        if: steps.fetch.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sources/vietmap/secrect.bin sources/vietmap/vietmap_manifest.json
+          git commit -m "data(vietmap): cap nhat du lieu VietMap SpeedMap ${{ steps.fetch.outputs.version }}"
+          git push
+
+      - name: Trigger build-alerts workflow
+        if: steps.fetch.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Dữ liệu VietMap đã cập nhật lên phiên bản ${{ steps.fetch.outputs.version }}, kích hoạt build-alerts..."
+          gh workflow run build-alerts.yml

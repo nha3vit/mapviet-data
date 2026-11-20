@@ -14,9 +14,10 @@ OpenStreetMap Vietnam extract (Geofabrik) with the VietHUD pipeline.
 - Workflow: `.github/workflows/build-alerts.yml` (daily 09:00 ICT, on changes to the sources/scripts, + manual run)
 - Inputs: VietHUD `speedmap/` (`cameras.bin`, `signs.bin`; signed manifest checked by `verify_viethud.py`
   with the VietHUD key), the VietMap point database `sources/vietmap/secrect.bin` (container; only the
-  `edogen.bin` partition is decoded by `vietmap_decode.py`) and WYN points `sources/wyn/wyn_points.csv`.
+  `edogen.bin` partition is decoded by `vietmap_decode.py`), WYN points `sources/wyn/wyn_points.csv`, and OSM traffic lights / toll booths (`osm_signs.bin` from the
+  latest network release, signature-checked by `verify_road_signs.py`).
 - `alerts.py` (copy of `VietHUD/tools/alerts.py`, the canonical source) merges with source priority
-  **VietMap > WYN > VietHUD base**: a lower-priority point of the same kind within 30 m (camera),
+  **VietMap > WYN > VietHUD base > OSM**: a lower-priority point of the same kind within 30 m (camera),
   45 m (traffic light) or 20 m (other sign) of a higher-priority point is dropped. Every decoded VietMap
   point is kept unchanged (the build stops otherwise). All cameras go to `cameras.bin`; `signs.bin` has
   no sign type 4. Camera speed: `0` = no speed enforcement, `-1` = unknown, else a multiple of 5 in [5, 130].
@@ -25,6 +26,10 @@ OpenStreetMap Vietnam extract (Geofabrik) with the VietHUD pipeline.
   (`version <ver>` then `<file> <size> <sha256>`), `manifest.txt.sig` (MapViet key),
   `cameras.bin`, `signs.bin` (VietHUD binary formats), `stats.json`.
 - App URL: `https://github.com/nha3vit/mapviet-data/releases/download/alerts/manifest.txt`
+
+- `.github/workflows/update-vietmap.yml` (daily 08:00 ICT): checks download.vietmap.vn for a newer
+  `VietMap_SpeedMap_M2_<YYYY>T<MM>.zip`; if found, keeps the 512-byte directory + `edogen.bin`, checks the
+  point count, commits `sources/vietmap/` and starts `build-alerts`.
 
 Run locally:
 

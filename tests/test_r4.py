@@ -321,6 +321,154 @@ class TestR4Standardization(unittest.TestCase):
             alerts.merge_and_deduplicate([vm_pt])
         self.assertIn("[LOI F1] Sai lệch hướng VietMap ở đầu ra!", str(ctx.exception))
 
+    def test_base_end_sign_conflict_vietmap(self):
+        """
+        Mục 19.1 (G1):
+        Biển loại 1 tốc độ 0 của nền mâu thuẫn với biển số VietMap (>0) trong 50m cùng hướng (<= 45 độ hoặc 1 bên không rõ) -> bỏ.
+        - Biển nền 0 cách biển VietMap 60 40 m cùng hướng -> bỏ;
+        - Cách 60 m -> giữ;
+        - Ngược hướng (>= 135 độ) -> giữ;
+        - Biển VietMap không đổi.
+        """
+        lat1 = 21.0000000
+        lon1 = 105.8000000
+        lat_40m = lat1 + meters_to_lat_deg(40.0)
+        lat_60m = lat1 + meters_to_lat_deg(60.0)
+
+        vm_60 = alerts.AlertPoint(
+            lat=lat1, lon=lon1, sign_type=alerts.SIGN_TYPE_SPEED_LIMIT, speed_limit=60,
+            heading=90, is_camera=False, source="VietMap", priority=alerts.PRIORITY_VIETMAP,
+            desc="VM 60", kind="sign", original_type=1, decoded_heading=90
+        )
+
+        # 1. Cách 40m cùng hướng (90 vs 90) -> bỏ biển nền
+        base_40m_same = alerts.AlertPoint(
+            lat=lat_40m, lon=lon1, sign_type=alerts.SIGN_TYPE_SPEED_LIMIT, speed_limit=0,
+            heading=90, is_camera=False, source="Base", priority=alerts.PRIORITY_BASE,
+            desc="Base 0 40m", kind="sign", original_type=1, decoded_heading=90
+        )
+        res1, stats1 = alerts.merge_and_deduplicate([vm_60, base_40m_same])
+        self.assertEqual(len(res1), 1)
+        self.assertEqual(res1[0].source, "VietMap")
+        self.assertEqual(res1[0].speed_limit, 60)
+        self.assertEqual(stats1["base_end_sign_conflict_vietmap_dropped"], 1)
+
+        # 2. Cách 60m cùng hướng -> giữ cả 2
+        base_60m_same = alerts.AlertPoint(
+            lat=lat_60m, lon=lon1, sign_type=alerts.SIGN_TYPE_SPEED_LIMIT, speed_limit=0,
+            heading=90, is_camera=False, source="Base", priority=alerts.PRIORITY_BASE,
+            desc="Base 0 60m", kind="sign", original_type=1, decoded_heading=90
+        )
+        res2, stats2 = alerts.merge_and_deduplicate([vm_60, base_60m_same])
+        self.assertEqual(len(res2), 2)
+        self.assertEqual(stats2["base_end_sign_conflict_vietmap_dropped"], 0)
+
+        # 3. Cách 40m ngược hướng (90 vs 270, diff=180 >= 135) -> giữ cả 2
+        base_40m_opp = alerts.AlertPoint(
+            lat=lat_40m, lon=lon1, sign_type=alerts.SIGN_TYPE_SPEED_LIMIT, speed_limit=0,
+            heading=270, is_camera=False, source="Base", priority=alerts.PRIORITY_BASE,
+            desc="Base 0 40m opp", kind="sign", original_type=1, decoded_heading=270
+        )
+        res3, stats3 = alerts.merge_and_deduplicate([vm_60, base_40m_opp])
+        self.assertEqual(len(res3), 2)
+        self.assertEqual(stats3["base_end_sign_conflict_vietmap_dropped"], 0)
+
+        # 4. Cách 40m nhưng một bên không rõ hướng (heading=DIR_OMNI) -> bỏ biển nền
+        base_40m_omni = alerts.AlertPoint(
+            lat=lat_40m, lon=lon1, sign_type=alerts.SIGN_TYPE_SPEED_LIMIT, speed_limit=0,
+            heading=alerts.DIR_OMNI, is_camera=False, source="Base", priority=alerts.PRIORITY_BASE,
+            desc="Base 0 40m omni", kind="sign", original_type=1
+        )
+        res4, stats4 = alerts.merge_and_deduplicate([vm_60, base_40m_omni])
+        self.assertEqual(len(res4), 1)
+        self.assertEqual(res4[0].source, "VietMap")
+        self.assertEqual(stats4["base_end_sign_conflict_vietmap_dropped"], 1)
+
+    def test_osm_signs_priority_and_deduplication(self):
+        """
+        Mục 19.3 (I):
+        - OSM có ưu tiên thấp nhất (PRIORITY_OSM = 4).
+        - Đèn OSM cách đèn nguồn khác (Base/WYN/VietMap) <= 45m -> BỎ; cách > 45m -> GIỮ.
+        - Trạm thu phí OSM cách trạm nguồn khác <= 20m -> BỎ; cách > 20m -> GIỮ.
+        - Giữ reserved = 3 (SOURCE_CODE_OSM).
+        """
+        lat0, lon0 = 21.0000000, 105.8000000
+        lat_30m = lat0 + meters_to_lat_deg(30.0)
+        lat_60m = lat0 + meters_to_lat_deg(60.0)
+        lat_10m = lat0 + meters_to_lat_deg(10.0)
+
+        # 1. Đèn Base tại lat0 + đèn OSM tại lat_30m (30m <= 45m) -> bỏ đèn OSM
+        base_light = alerts.AlertPoint(
+            lat=lat0, lon=lon0, sign_type=alerts.SIGN_TYPE_TRAFFIC_LIGHT, speed_limit=0,
+            heading=90, is_camera=False, source="Base", priority=alerts.PRIORITY_BASE,
+            desc="Base Light", kind="light"
+        )
+        osm_light_30m = alerts.AlertPoint(
+            lat=lat_30m, lon=lon0, sign_type=alerts.SIGN_TYPE_TRAFFIC_LIGHT, speed_limit=0,
+            heading=90, is_camera=False, source="OSM", priority=alerts.PRIORITY_OSM,
+            desc="OSM Light 30m", kind="light"
+        )
+        res1, s1 = alerts.merge_and_deduplicate([base_light, osm_light_30m])
+        self.assertEqual(len(res1), 1)
+        self.assertEqual(res1[0].source, "Base")
+        self.assertEqual(s1["osm_kept"], 0)
+        self.assertIn("OSM->Base", s1["dropped_by_source_pair"])
+
+        # 2. Đèn Base tại lat0 + đèn OSM tại lat_60m (60m > 45m) -> giữ cả hai
+        osm_light_60m = alerts.AlertPoint(
+            lat=lat_60m, lon=lon0, sign_type=alerts.SIGN_TYPE_TRAFFIC_LIGHT, speed_limit=0,
+            heading=90, is_camera=False, source="OSM", priority=alerts.PRIORITY_OSM,
+            desc="OSM Light 60m", kind="light"
+        )
+        res2, s2 = alerts.merge_and_deduplicate([base_light, osm_light_60m])
+        self.assertEqual(len(res2), 2)
+        self.assertEqual(s2["osm_kept"], 1)
+
+        # 3. Trạm thu phí Base tại lat0 + trạm thu phí OSM tại lat_10m (10m <= 20m) -> bỏ OSM
+        base_toll = alerts.AlertPoint(
+            lat=lat0, lon=lon0, sign_type=alerts.SIGN_TYPE_TOLL_BOOTH, speed_limit=0,
+            heading=alerts.DIR_OMNI, is_camera=False, source="Base", priority=alerts.PRIORITY_BASE,
+            desc="Base Toll", kind="sign"
+        )
+        osm_toll_10m = alerts.AlertPoint(
+            lat=lat_10m, lon=lon0, sign_type=alerts.SIGN_TYPE_TOLL_BOOTH, speed_limit=0,
+            heading=alerts.DIR_OMNI, is_camera=False, source="OSM", priority=alerts.PRIORITY_OSM,
+            desc="OSM Toll 10m", kind="sign"
+        )
+        res3, s3 = alerts.merge_and_deduplicate([base_toll, osm_toll_10m])
+        self.assertEqual(len(res3), 1)
+        self.assertEqual(res3[0].source, "Base")
+        self.assertEqual(s3["osm_kept"], 0)
+
+        # 4. Trạm thu phí OSM cách > 20m (lat_30m) -> giữ
+        osm_toll_30m = alerts.AlertPoint(
+            lat=lat_30m, lon=lon0, sign_type=alerts.SIGN_TYPE_TOLL_BOOTH, speed_limit=0,
+            heading=alerts.DIR_OMNI, is_camera=False, source="OSM", priority=alerts.PRIORITY_OSM,
+            desc="OSM Toll 30m", kind="sign"
+        )
+        res4, s4 = alerts.merge_and_deduplicate([base_toll, osm_toll_30m])
+        self.assertEqual(len(res4), 2)
+        self.assertEqual(s4["osm_kept"], 1)
+
+        # 5. Kiểm tra export_binary_files gán reserved == 3 cho OSM
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_p = Path(tmpdir)
+            alerts.allocate_stable_ids(res4)
+            _, signs_path, _, _ = alerts.export_binary_files(
+                master_points=res4,
+                out_dir=out_p,
+                base_timestamp=12345,
+                vietmap_version="T11",
+                stats_merge=s4
+            )
+            data = signs_path.read_bytes()
+            # Đọc 2 điểm trong signs.bin
+            pt1 = struct.unpack_from(alerts.SIGN_POINT_FMT, data, 20)
+            pt2 = struct.unpack_from(alerts.SIGN_POINT_FMT, data, 40)
+            res_vals = [pt1[8], pt2[8]]
+            self.assertIn(alerts.SOURCE_CODE_BASE, res_vals) # 0
+            self.assertIn(alerts.SOURCE_CODE_OSM, res_vals)  # 3
+
 
 if __name__ == "__main__":
     unittest.main()

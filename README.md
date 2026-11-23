@@ -1,53 +1,61 @@
-# mapviet-data
+# MapViet data pipeline — mạng đường OSM tự build hằng ngày
 
-Daily road-network pack for the MapViet Android app, built automatically from the latest
-OpenStreetMap Vietnam extract (Geofabrik) with the VietHUD pipeline.
+Mỗi ngày GitHub Actions tải bản OSM Việt Nam mới nhất (Geofabrik), build mạng đường bằng pipeline VietHUD (`synthesize_and_pack.py`, ghim phiên bản), tách đèn tín hiệu OSM thành `lights.bin`, nén `.gz`, ký `manifest.txt` và phát hành lên GitHub Releases. App MapViet tải gói này khi mở app có mạng (chỉ khi có phiên bản mới).
 
-- Workflow: `.github/workflows/build-network.yml` (daily 08:30 ICT + manual run)
-- Output (GitHub Releases, `latest`): `manifest.txt`, `manifest.txt.sig` (ECDSA P-256, base64 DER),
-  `metadata.bin.gz index.bin.gz tiles.bin.gz names.bin.gz seg_names.bin.gz lights.bin.gz`
-- `manifest.txt`: `version <ver>` then `<file> <size> <sha256> <gz_size>` (size/sha256 of the uncompressed file)
-- `lights.bin`: OSM `highway=traffic_signals` in VNSG sign format (type 6)
+Đo thử trên máy Mac (OSM 2026-11-15): 8,85 triệu đoạn đường, 171 541 tile, 8 213 đèn tín hiệu; giải nén 289 MB, **tải về 117 MB**; build 4,4 phút, RAM đỉnh 7,4 GB → cần runner 16 GB RAM (repo **công khai** dùng `ubuntu-latest` miễn phí có 16 GB).
 
-## Alert pack (cameras + signs)
+## Thiết lập (chủ dự án tự làm — có bước liên quan khoá bí mật)
 
-- Workflow: `.github/workflows/build-alerts.yml` (daily 09:00 ICT, on changes to the sources/scripts, + manual run)
-- Inputs: VietHUD `speedmap/` (`cameras.bin`, `signs.bin`; signed manifest checked by `verify_viethud.py`
-  with the VietHUD key), the VietMap point database `sources/vietmap/secrect.bin` (container; only the
-  `edogen.bin` partition is decoded by `vietmap_decode.py`), WYN points `sources/wyn/wyn_points.csv`, and OSM traffic lights / toll booths (`osm_signs.bin` from the
-  latest network release, signature-checked by `verify_road_signs.py`).
-- `alerts.py` (copy of `VietHUD/tools/alerts.py`, the canonical source) merges with source priority
-  **VietMap > WYN > VietHUD base > OSM**: a lower-priority point of the same kind within 30 m (camera),
-  45 m (traffic light) or 20 m (other sign) of a higher-priority point is dropped. Every decoded VietMap
-  point is kept unchanged (the build stops otherwise). All cameras go to `cameras.bin`; `signs.bin` has
-  no sign type 4. Camera speed: `0` = no speed enforcement, `-1` = unknown, else a multiple of 5 in [5, 130].
-- After the build, `validate_speedmap.py --alerts-only` and `validate_alerts.py` must pass.
-- Output (GitHub Release with the fixed tag **`alerts`**, not `latest`): `manifest.txt`
-  (`version <ver>` then `<file> <size> <sha256>`), `manifest.txt.sig` (MapViet key),
-  `cameras.bin`, `signs.bin` (VietHUD binary formats), `stats.json`.
-- App URL: `https://github.com/nha3vit/mapviet-data/releases/download/alerts/manifest.txt`
+1. Tạo repo **công khai** trên GitHub, ví dụ `mapviet-data` (dữ liệu OSM theo giấy phép ODbL, công khai là phù hợp).
+2. Tạo cặp khoá ký (chạy trên máy của bạn, **không gửi khoá bí mật cho ai**):
+   ```bash
+   openssl ecparam -name prime256v1 -genkey -noout -out mapviet_signing_key.pem
+   openssl ec -in mapviet_signing_key.pem -pubout -out mapviet_signing_pub.pem
+   ```
+   Cất `mapviet_signing_key.pem` an toàn (password manager). **Không** đưa vào git.
+3. Thêm secret `MAPVIET_SIGNING_KEY` vào repo (Settings → Secrets and variables → Actions → New repository secret) với **toàn bộ nội dung** file `mapviet_signing_key.pem`.
+4. Chép vào repo `mapviet-data`:
+   - `data-pipeline/workflows/build-network.yml` → `.github/workflows/build-network.yml`
+   - `data-pipeline/postprocess.py` → `postprocess.py` (gốc repo)
+5. Vào tab **Actions** → `build-network` → **Run workflow** để chạy lần đầu (~10–15 phút).
+6. Gửi cho Claude: tên tài khoản/tổ chức GitHub chứa repo và nội dung `mapviet_signing_pub.pem` (khoá **công khai**, an toàn để chia sẻ) → Claude cấu hình URL + public key vào app.
 
-- `.github/workflows/update-vietmap.yml` (daily 08:00 ICT): checks download.vietmap.vn for a newer
-  `VietMap_SpeedMap_M2_<YYYY>T<MM>.zip`; if found, keeps the 512-byte directory + `edogen.bin`, checks the
-  point count, commits `sources/vietmap/` and starts `build-alerts`.
+URL app sẽ dùng: `https://github.com/<owner>/mapviet-data/releases/latest/download/manifest.txt`
 
-Run locally:
+## Chạy thử cục bộ
 
 ```bash
-mkdir vh && for f in manifest.txt manifest.txt.sig cameras.bin signs.bin; do
-  curl -fsSL -o vh/$f https://raw.githubusercontent.com/911273/VietHUD/main/speedmap/$f; done
-pip install cryptography==50.0.1
-python3 verify_viethud.py vh
-python3 alerts.py --base vh --vietmap sources/vietmap/secrect.bin --wyn sources/wyn/wyn_points.csv --out alerts_out --no-sign
-python3 validate_alerts.py alerts_out --vietmap sources/vietmap/secrect.bin
-python3 -m unittest discover -s tests
+python3 -m venv .venv && .venv/bin/pip install "osmium>=3.6,<5"
+curl -fLO https://download.geofabrik.de/asia/vietnam-latest.osm.pbf
+git clone https://github.com/nha3vit/VietHUD.git && cd VietHUD/tools/viethud-pipeline
+VIETHUD_PIPELINE_HOME=/tmp/vh ../../../.venv/bin/python synthesize_and_pack.py \
+  --pbf ../../../vietnam-latest.osm.pbf --out /tmp/net --region VN --custom-alerts /tmp/vh/empty
+python3 ../../../data-pipeline/postprocess.py /tmp/net /tmp/release
 ```
 
-## Sources and licences
+Dữ liệu: © OpenStreetMap contributors (ODbL). Pipeline: VietHUD (dùng với sự đồng ý của tác giả).
 
-- Road network and `lights.bin`: © OpenStreetMap contributors, Open Database License (ODbL).
-- Pipeline and speedmap alert data: VietHUD (github.com/911273/VietHUD), used with the author's permission.
-- VietMap warning points (`sources/vietmap/`): © VietMap, used and redistributed with VietMap's permission.
-  Not covered by the ODbL.
-- WYN warning points (`sources/wyn/`): extracted from the WYN app, redistributed with WYN's permission — thanks to WYN.
-  Not covered by the ODbL.
+## Gói cảnh báo (VietHUD + VietMap + WYN) — Chuẩn R6
+
+Workflow `workflows/build-alerts.yml` (chép vào `mapviet-data/.github/workflows/`) chạy hằng ngày hoặc kích hoạt thủ công:
+1. Tải `cameras.bin`/`signs.bin` VietHUD và kiểm chữ ký bằng `verify_viethud.py`.
+2. Gộp VietHUD nền với VietMap (`sources/vietmap/secrect.bin` qua `vietmap_decode.py`) và WYN (`sources/wyn/wyn_points.csv`) bằng engine `alerts.py` chuẩn R6:
+   - Ưu tiên nguồn: VietMap (P1) > WYN (P2) > Nền VietHUD (P3).
+   - Bảo toàn 100% dữ liệu VietMap (nguyên tắc D2: giữ đủ 83.823 điểm, không sửa toạ độ, loại, tốc độ, hướng).
+   - Xử lý triệt để lỗi phân loại WYN: loại bỏ 6.210 điểm WYN mã 2 ("báo hết đoạn đường") không có tốc độ gán nhãn 50 km/h sai lệch; xử lý đúng nhóm cấm vượt (P.125 / DP.135).
+   - Bổ sung nhóm biển báo hướng đi và cấm dừng đỗ: Đoạn đường cấm dừng cấm đỗ (loại 22), Cấm rẽ trái (loại 23), Cấm rẽ phải (loại 24), Cấm quay đầu (loại 25), Hướng đi bắt buộc / Cấm đi thẳng (loại 26).
+   - Lọc nhiễu không gian: bán kính 30 m (camera), 45 m (đèn tín hiệu), 20 m (biển khác).
+   - Không có biển loại 4 trong signs.bin.
+   - Nhận diện và quy chuẩn heading giả, kế thừa thuộc tính hợp lệ.
+3. Ký `manifest.txt` bằng khoá MapViet qua `sign_manifest.py` (tạo `manifest.txt.sig`).
+4. Kiểm định nghiêm ngặt bằng `validate_speedmap.py --alerts-only` và `validate_alerts.py` trước khi phát hành.
+5. Phát hành ở release cố định `alerts` (không đánh dấu `latest`, không chạm đến release `latest` của mạng đường).
+
+App tải từ: `https://github.com/nha3vit/mapviet-data/releases/download/alerts/manifest.txt`
+
+Chạy test cảnh báo:
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Bản quyền dữ liệu: VietMap © VietMap; dữ liệu WYN — cảm ơn WYN; speedmap nền từ VietHUD.

@@ -159,10 +159,10 @@ class TestVietmapMappingR5B(unittest.TestCase):
         self.assertEqual(p3.speed_limit, 0)
         self.assertEqual(p3.heading, 270)
 
-        # 4. Type 4: Sign 6 TRAFFIC_LIGHT sub 0
+        # 4. Type 4: Sign 10 DANGER_OTHER sub 4 (R6)
         p4 = next(p for p in pts if getattr(p, "original_type", None) == 4)
-        self.assertEqual(p4.sign_type, alerts.SIGN_TYPE_TRAFFIC_LIGHT)
-        self.assertEqual(p4.sub_type, 0)
+        self.assertEqual(p4.sign_type, alerts.SIGN_TYPE_DANGER_OTHER)
+        self.assertEqual(p4.sub_type, 4)
         self.assertEqual(p4.speed_limit, 0)
         self.assertEqual(p4.heading, 45)
 

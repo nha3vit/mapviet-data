@@ -92,11 +92,11 @@ class TestVietmapMappingR5(unittest.TestCase):
         self.assertEqual(p3.speed_limit, 0)
         self.assertEqual(p3.heading, 270)
 
-        # R5b: Loại 4 là đèn giao thông (sign 6, sub 0); 5/6 là cấm vượt bắt đầu (sign 3, sub 0) / hết (sign 3, sub 1);
+        # R6: Loại 4 là nút giao / giao lộ (sign 10, sub 4); 5/6 là cấm vượt bắt đầu (sign 3, sub 0) / hết (sign 3, sub 1);
         # 7 là cảnh báo khác "Chú ý" (sign 10, sub 7); 10 là cảnh báo khác chỉ vẽ (sign 10, sub 10).
         p4 = next(p for p in pts if getattr(p, "original_type", None) == 4)
-        self.assertEqual(p4.sign_type, alerts.SIGN_TYPE_TRAFFIC_LIGHT)
-        self.assertEqual(p4.sub_type, 0)
+        self.assertEqual(p4.sign_type, alerts.SIGN_TYPE_DANGER_OTHER)
+        self.assertEqual(p4.sub_type, 4)
         self.assertEqual(p4.speed_limit, 0)
 
         p5 = next(p for p in pts if getattr(p, "original_type", None) == 5)

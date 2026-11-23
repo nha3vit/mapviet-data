@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Bản sao từ VietHUD/tools/alerts.py — nguồn chuẩn là VietHUD/tools; sửa ở đó rồi chép lại
 """
 tools/alerts.py — Engine hợp nhất, khử trùng lặp và làm sạch dữ liệu cảnh báo giao thông VietHUD.
 
@@ -31,6 +30,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import struct
 import sys
 import time
@@ -66,9 +66,10 @@ SIGN_TYPE_DANGER_OTHER   = 10
 # Bảng ánh xạ các loại biển cũ bị gán sai trong VietHUD nền và WYN (Chuẩn R5a)
 STALE_OLD_MAP = {2: {6}, 3: {6}, 4: {2}, 5: {5}, 6: {6}, 7: {10}, 8: {10}, 9: {10}, 10: {3}}
 
-# Bán kính khử trùng lặp chuẩn R3
+# Bán kính khử trùng lặp chuẩn R3 / R6
 RADIUS_CAMERA_M          = 30.0  # Camera
 RADIUS_LIGHT_M           = 45.0  # Đèn tín hiệu giao thông (Sign 6)
+RADIUS_TOLL_M            = 300.0 # Trạm thu phí BOT/ETC (R6 khử trùng 300m)
 RADIUS_OTHER_SIGN_M      = 20.0  # Biển báo khác (so cùng sign_type)
 RADIUS_SAME_SRC_DUP_M    = 2.0   # Bán kính trùng tuyệt đối cùng nguồn (m)
 HEADING_SAME_SRC_TOL_DEG = 5     # Dung sai góc hướng trùng tuyệt đối cùng nguồn (độ)
@@ -294,19 +295,20 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 decoded_heading=p.heading,
             )
         elif p.type == vmd.TYPE_SIGNAL:
-            # Type 4: Sign 6 TRAFFIC_LIGHT, subType 0 (đèn/nút giao có đèn), speed = 0
+            # Type 4: Nút giao / giao lộ theo nhánh
+            # R6: Gán Sign 10 DANGER_OTHER, subType 4 (chỉ vẽ trên bản đồ, tuyệt đối không đọc tiếng)
             pt = AlertPoint(
                 lat=p.lat,
                 lon=p.lon,
-                sign_type=SIGN_TYPE_TRAFFIC_LIGHT,
+                sign_type=SIGN_TYPE_DANGER_OTHER,
                 speed_limit=0,
                 heading=hd,
                 is_camera=False,
                 source="VietMap",
                 priority=PRIORITY_VIETMAP,
-                desc="VietMap Traffic Light",
-                kind="light",
-                sub_type=0,
+                desc="VietMap Junction (Visual Only)",
+                kind="sign",
+                sub_type=4,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
@@ -507,8 +509,10 @@ def load_wyn_alerts(csv_path: Path) -> list[AlertPoint]:
                 ))
             else:  # kind == "sign"
                 stype = int(stype_str) if stype_str else SIGN_TYPE_DANGER_OTHER
-                if stype == 4:
-                    # Tuyệt đối không tự thêm sign type 4 từ WYN (camera chỉ vào cameras.bin)
+                if stype in (2, 3, 4):
+                    # R6: Loại bỏ 6.210 điểm WYN mã 2 và 411 điểm mã 3 khỏi KDC / cấm vượt
+                    # (KDC và Cấm vượt lấy 100% từ cặp đối xứng chuẩn VietMap).
+                    # Tuyệt đối không tự thêm sign type 4 từ WYN (camera chỉ vào cameras.bin).
                     continue
                 # Chỉ sign_type 1 có speed, bội số của 5 trong [5, 130] hoặc 0
                 if stype == SIGN_TYPE_SPEED_LIMIT:
@@ -863,6 +867,7 @@ def merge_and_deduplicate(
         osm_signal_source = "osm_ground_truth.json" if osm_signals else "none"
 
     stats = {
+        "version": os.environ.get("MAPVIET_ALERTS_VERSION", ""),
         "a1_osm_signal_source": osm_signal_source,
         "a1_osm_signal_count": len(osm_signals) if osm_signals else 0,
         "vietmap_kept": 0,
@@ -1047,10 +1052,10 @@ def merge_and_deduplicate(
             master_cameras.append(converted_cam)
             cam_spatial_index.insert(c_idx, converted_cam)
 
-    # 3. Khử trùng Signs (đèn 45m, biển khác 20m)
+    # 3. Khử trùng Signs (đèn 45m, trạm thu phí 300m, biển khác 20m)
     master_signs = deduplicate_points(
         sign_candidates,
-        get_radius_func=lambda p: RADIUS_LIGHT_M if p.sign_type == SIGN_TYPE_TRAFFIC_LIGHT else RADIUS_OTHER_SIGN_M,
+        get_radius_func=lambda p: RADIUS_LIGHT_M if p.sign_type == SIGN_TYPE_TRAFFIC_LIGHT else (RADIUS_TOLL_M if p.sign_type == SIGN_TYPE_TOLL_BOOTH else RADIUS_OTHER_SIGN_M),
         stats_counter=stats,
     )
 
@@ -1514,8 +1519,15 @@ def export_binary_files(
         same_dir_md = out_dir / "same_dir_cameras.md"
     same_dir_stats = measure_same_direction_cameras(cameras, same_dir_md)
 
+    eff_version = (
+        version
+        or os.environ.get("MAPVIET_ALERTS_VERSION")
+        or (stats_merge or {}).get("version")
+        or ""
+    )
+
     stats_dict = {
-        "version": version if version is not None else (stats_merge or {}).get("version", ""),
+        "version": eff_version,
         "a1_osm_signal_source": (stats_merge or {}).get("a1_osm_signal_source", "none"),
         "a1_osm_signal_count": (stats_merge or {}).get("a1_osm_signal_count", 0),
         "cameras_count": len(cameras),
@@ -1735,7 +1747,8 @@ def main():
     # Gán ID ổn định
     allocate_stable_ids(master_points)
 
-    ver = args.version or time.strftime("%Y.%m.%d.%H%M")
+    ver_stats = args.version or os.environ.get("MAPVIET_ALERTS_VERSION") or ""
+    ver_manifest = ver_stats or time.strftime("%Y.%m.%d.%H%M")
 
     # Xuất file nhị phân
     cams_path, signs_path, csv_path, stats_path = export_binary_files(
@@ -1744,11 +1757,11 @@ def main():
         base_timestamp=base_ts,
         vietmap_version=vm_version,
         stats_merge=stats,
-        version=args.version or "",
+        version=ver_stats,
     )
 
     # Sinh manifest & ký
-    write_manifest(args.out, version=ver, no_sign=args.no_sign)
+    write_manifest(args.out, version=ver_manifest, no_sign=args.no_sign)
 
 
 if __name__ == "__main__":

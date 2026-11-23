@@ -72,10 +72,10 @@ class TestAlerts(unittest.TestCase):
         s2 = next(p for p in signs if p.sign_type == 2)
         self.assertEqual(s2.speed_limit, 0)
         self.assertEqual(s2.sub_type, 0)
-        # R5b: Type 4 -> Sign 6 (TRAFFIC_LIGHT), subType 0; Type 5 -> Sign 3 (NO_OVERTAKING), subType 0; Type 10 -> Sign 10, subType 10
+        # R6: Type 4 -> Sign 10 (DANGER_OTHER), subType 4 (nút giao theo nhánh chỉ vẽ); Type 5 -> Sign 3 (NO_OVERTAKING), subType 0; Type 10 -> Sign 10, subType 10
         s4 = next(p for p in signs if getattr(p, "original_type", None) == 4)
-        self.assertEqual(s4.sign_type, alerts.SIGN_TYPE_TRAFFIC_LIGHT)
-        self.assertEqual(s4.sub_type, 0)
+        self.assertEqual(s4.sign_type, alerts.SIGN_TYPE_DANGER_OTHER)
+        self.assertEqual(s4.sub_type, 4)
         s5 = next(p for p in signs if getattr(p, "original_type", None) == 5)
         self.assertEqual(s5.sign_type, alerts.SIGN_TYPE_NO_OVERTAKING)
         self.assertEqual(s5.sub_type, 0)
@@ -335,38 +335,24 @@ class TestAlerts(unittest.TestCase):
         hdr = struct.pack(alerts.SIGN_HEADER_FMT, b"VNSG", 1, 1, 0, crc, 1700000000)
         osm_bin.write_bytes(hdr + pt_body)
 
-        # 2. Tạo wyn_points.csv có 1 KDC cách 20m (bị bỏ) và 1 KDC cách 100m (giữ)
-        wyn_csv = self.td / "wyn_kdc.csv"
+        # 2. Tạo base_dir có 1 KDC cách 20m (bị bỏ) và 1 KDC cách 100m (giữ)
+        base_dir = self.td / "base_a1"
+        base_dir.mkdir(parents=True, exist_ok=True)
         lat_20m = lat_light + (20.0 / 111139.0)
         lat_100m = lat_light + (100.0 / 111139.0)
-        with open(wyn_csv, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["lat", "lon", "kind", "sign_type", "speed_kmh", "heading", "source"])
-            writer.writeheader()
-            writer.writerow({
-                "lat": f"{lat_20m:.6f}",
-                "lon": f"{lon_light:.6f}",
-                "kind": "sign",
-                "sign_type": "2",
-                "speed_kmh": "0",
-                "heading": "90",
-                "source": "WYN"
-            })
-            writer.writerow({
-                "lat": f"{lat_100m:.6f}",
-                "lon": f"{lon_light:.6f}",
-                "kind": "sign",
-                "sign_type": "2",
-                "speed_kmh": "0",
-                "heading": "90",
-                "source": "WYN"
-            })
+        pt1 = struct.pack(alerts.SIGN_POINT_FMT, 1, int(round(lat_20m * 1e7)), int(round(lon_light * 1e7)), 90, alerts.SIGN_TYPE_RESIDENT_AREA, 0, 0, 0, alerts.SOURCE_CODE_BASE)
+        pt2 = struct.pack(alerts.SIGN_POINT_FMT, 2, int(round(lat_100m * 1e7)), int(round(lon_light * 1e7)), 90, alerts.SIGN_TYPE_RESIDENT_AREA, 0, 0, 0, alerts.SOURCE_CODE_BASE)
+        base_body = pt1 + pt2
+        base_crc = zlib.crc32(base_body) & 0xFFFFFFFF
+        base_hdr = struct.pack(alerts.SIGN_HEADER_FMT, b"VNSG", 1, 2, 0, base_crc, 1700000000)
+        (base_dir / "signs.bin").write_bytes(base_hdr + base_body)
 
         out_dir = self.td / "out_osm_signs_test"
         cmd = [
             "alerts.py",
             "--osm-ground-truth", str(self.td / "khong_ton_tai.json"),
             "--osm-signs", str(osm_bin),
-            "--wyn", str(wyn_csv),
+            "--base", str(base_dir),
             "--out", str(out_dir),
             "--version", "2026.11.20.9999",
             "--no-sign",
@@ -401,8 +387,8 @@ class TestAlerts(unittest.TestCase):
                 "lat": "21.300000",
                 "lon": "105.500000",
                 "kind": "sign",
-                "sign_type": "2",
-                "speed_kmh": "0",
+                "sign_type": "1",
+                "speed_kmh": "60",
                 "heading": "90",
                 "source": "WYN"
             })
@@ -422,6 +408,55 @@ class TestAlerts(unittest.TestCase):
         self.assertEqual(stats["a1_osm_signal_source"], "none")
         self.assertEqual(stats["a1_osm_signal_count"], 0)
         self.assertEqual(stats["version"], "")
+
+    def test_stats_json_records_version_from_env_or_param(self):
+        """Mục 23.3: stats.json phải có version từ biến môi trường MAPVIET_ALERTS_VERSION hoặc tham số --version."""
+        from unittest.mock import patch
+        import os
+
+        wyn_csv = self.td / "wyn_version_test.csv"
+        with open(wyn_csv, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["lat", "lon", "kind", "sign_type", "speed_kmh", "heading", "source"])
+            writer.writeheader()
+            writer.writerow({
+                "lat": "21.300000",
+                "lon": "105.500000",
+                "kind": "sign",
+                "sign_type": "1",
+                "speed_kmh": "60",
+                "heading": "90",
+                "source": "WYN"
+            })
+
+        # 1. Thử với MAPVIET_ALERTS_VERSION trong env
+        out_dir_env = self.td / "out_env_version"
+        cmd = [
+            "alerts.py",
+            "--wyn", str(wyn_csv),
+            "--out", str(out_dir_env),
+            "--no-sign",
+        ]
+        with patch.dict(os.environ, {"MAPVIET_ALERTS_VERSION": "2026.11.22.9999"}):
+            with patch("sys.argv", cmd):
+                alerts.main()
+
+        stats_env = json.loads((out_dir_env / "stats.json").read_text(encoding="utf-8"))
+        self.assertEqual(stats_env["version"], "2026.11.22.9999")
+
+        # 2. Thử với --version chỉ định trực tiếp qua CLI
+        out_dir_cli = self.td / "out_cli_version"
+        cmd_cli = [
+            "alerts.py",
+            "--wyn", str(wyn_csv),
+            "--out", str(out_dir_cli),
+            "--version", "2026.11.22.1234",
+            "--no-sign",
+        ]
+        with patch("sys.argv", cmd_cli):
+            alerts.main()
+
+        stats_cli = json.loads((out_dir_cli / "stats.json").read_text(encoding="utf-8"))
+        self.assertEqual(stats_cli["version"], "2026.11.22.1234")
 
 
 if __name__ == "__main__":

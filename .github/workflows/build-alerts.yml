@@ -121,7 +121,7 @@ jobs:
           wyn_cams = src_counts.get("WYN", {}).get("camera", 0)
           base_cams = src_counts.get("Base", {}).get("camera", 0)
 
-          print("MapViet alert pack: VietHUD speedmap + VietMap + WYN + OSM points, de-duplicated (Chuẩn R4).")
+          print("MapViet alert pack: VietHUD speedmap + VietMap + WYN + OSM points, de-duplicated (Chuẩn R6 - Đèn OSM, KDC VietMap, Trạm BOT 300m, Cấm dừng đỗ/cấm rẽ/quay đầu).")
           print(f"version: {s.get('version', '')}")
           print(f"vietmap_version: {s.get('vietmap_version', '')}")
           print(f"total_points: {s.get('total_points', 0)} (VietMap {vm_k:,} + WYN {wyn_k:,} + Base {base_k:,} + OSM {osm_k:,})")

@@ -441,13 +441,14 @@ class TestR4Standardization(unittest.TestCase):
         self.assertEqual(res3[0].source, "Base")
         self.assertEqual(s3["osm_kept"], 0)
 
-        # 4. Trạm thu phí OSM cách > 20m (lat_30m) -> giữ
-        osm_toll_30m = alerts.AlertPoint(
-            lat=lat_30m, lon=lon0, sign_type=alerts.SIGN_TYPE_TOLL_BOOTH, speed_limit=0,
+        # 4. Trạm thu phí OSM cách > 300m (lat_350m, R6 RADIUS_TOLL_M = 300m) -> giữ
+        lat_350m = lat0 + (350.0 / 111139.0)
+        osm_toll_350m = alerts.AlertPoint(
+            lat=lat_350m, lon=lon0, sign_type=alerts.SIGN_TYPE_TOLL_BOOTH, speed_limit=0,
             heading=alerts.DIR_OMNI, is_camera=False, source="OSM", priority=alerts.PRIORITY_OSM,
-            desc="OSM Toll 30m", kind="sign"
+            desc="OSM Toll 350m", kind="sign"
         )
-        res4, s4 = alerts.merge_and_deduplicate([base_toll, osm_toll_30m])
+        res4, s4 = alerts.merge_and_deduplicate([base_toll, osm_toll_350m])
         self.assertEqual(len(res4), 2)
         self.assertEqual(s4["osm_kept"], 1)
 

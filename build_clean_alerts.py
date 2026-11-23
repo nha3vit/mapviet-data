@@ -21,6 +21,8 @@ Nguyên tắc cốt lõi:
 4. Khử trùng lặp nội bộ VietMap <= 5m (loại bỏ điểm trùng trên các làn cao tốc).
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import hashlib
@@ -110,6 +112,7 @@ def build_clean_alerts(
     final_cameras = []
     final_signs = []
     wyn_cam_grid = defaultdict(list)
+    wyn_light_grid = defaultdict(list)
     wyn_toll_grid = defaultdict(list)
     CELL = 0.0005 # ~55m
 
@@ -172,6 +175,8 @@ def build_clean_alerts(
                 "reserved": 3, # WYN / OSM (reserved=3 yêu cầu AlertPointMerger bỏ qua lights.bin)
             }
             final_signs.append(sign)
+            gx, gy = int(lon / CELL), int(lat / CELL)
+            wyn_light_grid[(gx, gy)].append(sign)
             wyn_light_count += 1
 
         elif kind == "sign" and st == "5":
@@ -198,7 +203,14 @@ def build_clean_alerts(
             wyn_toll_count += 1
 
     # Nạp camera kiểm chứng thực tế (Curated/Custom Cameras)
-    curated_cams_path = wyn_csv.parent.parent / "curated" / "custom_cameras.csv"
+    curated_candidates = [
+        wyn_csv.parent.parent / "curated",
+        REPO_ROOT / "data-pipeline" / "sources" / "curated",
+        REPO_ROOT / "sources" / "curated",
+        Path(__file__).resolve().parent / "sources" / "curated",
+    ]
+    curated_dir = next((p for p in curated_candidates if p.exists()), wyn_csv.parent.parent / "curated")
+    curated_cams_path = curated_dir / "custom_cameras.csv"
     curated_cam_count = 0
     if curated_cams_path.exists():
         with open(curated_cams_path, "r", encoding="utf-8") as f:
@@ -225,10 +237,126 @@ def build_clean_alerts(
                 except Exception:
                     pass
 
+    # Nạp biển báo / đèn tín hiệu kiểm chứng thực tế (Curated/Custom Signs)
+    curated_signs_path = curated_dir / "custom_signs.csv"
+    curated_sign_count = 0
+    if curated_signs_path.exists():
+        with open(curated_signs_path, "r", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                try:
+                    sid = int(r["id"])
+                    lat = float(r["lat"])
+                    lon = float(r["lon"])
+                    st = int(r["sign_type"])
+                    sub_t = int(r.get("sub_type", 0))
+                    spd = int(r.get("speed", 0))
+                    hd = int(r.get("heading", DIR_OMNI))
+                    sign = {
+                        "id": sid,
+                        "lat": lat,
+                        "lon": lon,
+                        "sign_type": st,
+                        "sub_type": sub_t,
+                        "speed": spd,
+                        "heading": hd,
+                        "source": "CURATED",
+                        "reserved": 3,
+                    }
+                    final_signs.append(sign)
+                    used_sign_ids.add(sid)
+                    gx, gy = int(lon / CELL), int(lat / CELL)
+                    if st == 6:
+                        wyn_light_grid[(gx, gy)].append(sign)
+                    elif st == 5:
+                        wyn_toll_grid[(gx, gy)].append(sign)
+                    curated_sign_count += 1
+                except Exception:
+                    pass
+
+    # Nạp OSM ground truth (đèn tín hiệu toàn quốc) để đối chiếu và tích hợp
+    osm_gt_candidates = [
+        REPO_ROOT / "data-pipeline" / "sources" / "osm" / "osm_ground_truth.json",
+        REPO_ROOT / "sources" / "osm" / "osm_ground_truth.json",
+        REPO_ROOT / "VietHUD" / "build" / "osm_ground_truth.json",
+        Path(__file__).resolve().parent / "sources" / "osm" / "osm_ground_truth.json",
+    ]
+    osm_gt_path = next((p for p in osm_gt_candidates if p.exists()), None)
+    osm_lights = []
+    osm_light_grid = defaultdict(list)
+    osm_lights_added_count = 0
+    if osm_gt_path is not None and osm_gt_path.exists():
+        try:
+            with open(osm_gt_path, "r", encoding="utf-8") as f:
+                import json
+                gt = json.load(f)
+                osm_lights = gt.get("traffic_signals", [])
+                for lat, lon in osm_lights:
+                    gx, gy = int(lon / CELL), int(lat / CELL)
+                    osm_light_grid[(gx, gy)].append((lat, lon))
+            print(f"      + Tọa độ đèn tín hiệu OSM nạp từ ground truth: {len(osm_lights):,} điểm")
+
+            for lat, lon in osm_lights:
+                gx, gy = int(lon / CELL), int(lat / CELL)
+                # Kiểm tra trùng với WYN / Curated (<= 25m)
+                is_dup_wyn = False
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for ws in wyn_light_grid.get((gx + dx, gy + dy), []):
+                            if haversine(lat, lon, ws["lat"], ws["lon"]) <= 25.0:
+                                is_dup_wyn = True
+                                break
+                        if is_dup_wyn:
+                            break
+                if is_dup_wyn:
+                    continue
+
+                # Kiểm tra cụm nhiều cột đèn tại cùng một ngã tư trong OSM (<= 20m)
+                is_cluster_dup = False
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for os in wyn_light_grid.get((gx + dx, gy + dy), []):
+                            if os.get("source") == "OSM" and haversine(lat, lon, os["lat"], os["lon"]) <= 20.0:
+                                is_cluster_dup = True
+                                break
+                        if is_cluster_dup:
+                            break
+                if is_cluster_dup:
+                    continue
+
+                lat_e7 = int(round(lat * 1e7))
+                lon_e7 = int(round(lon * 1e7))
+                seed = f"sign|osm_light|{lat_e7}|{lon_e7}".encode()
+                sid = 0x80000000 | (zlib.crc32(seed) & 0x7FFFFFFF)
+                while sid in used_sign_ids:
+                    sid = 0x80000000 | ((sid + 1) & 0x7FFFFFFF)
+                used_sign_ids.add(sid)
+
+                sign = {
+                    "id": sid,
+                    "lat": lat,
+                    "lon": lon,
+                    "sign_type": 6, # TRAFFIC_LIGHT
+                    "sub_type": 0,
+                    "speed": 0,
+                    "heading": DIR_OMNI,
+                    "source": "OSM",
+                    "reserved": 3,
+                }
+                final_signs.append(sign)
+                wyn_light_grid[(gx, gy)].append(sign)
+                osm_lights_added_count += 1
+            print(f"      + Đèn tín hiệu OSM bổ sung sau khử trùng (<=20m/25m): {osm_lights_added_count:,} ngã tư")
+        except Exception as e:
+            print(f"      [!] Cảnh báo nạp osm_ground_truth.json: {e}")
+
     print(f"      + Camera WYN giữ lại:       {wyn_cam_count:,} điểm")
     if curated_cam_count > 0:
         print(f"      + Camera thực tế bổ sung:   {curated_cam_count:,} điểm (Cầu Hiệp Thượng, v.v.)")
-    print(f"      + Đèn tín hiệu OSM/WYN:    {wyn_light_count:,} điểm")
+    print(f"      + Đèn tín hiệu WYN:        {wyn_light_count:,} điểm")
+    print(f"      + Đèn tín hiệu OSM bổ sung: {osm_lights_added_count:,} ngã tư")
+    if curated_sign_count > 0:
+        print(f"      + Biển/đèn thực tế bổ sung: {curated_sign_count:,} điểm (Kinh Môn, v.v.)")
+    print(f"      + Tổng đèn tín hiệu chuẩn:  {wyn_light_count + osm_lights_added_count + curated_sign_count:,} điểm")
     print(f"      + Trạm thu phí WYN:        {wyn_toll_count:,} điểm")
 
     # -------------------------------------------------------------
@@ -276,6 +404,9 @@ def build_clean_alerts(
 
     vm_cams_added = 0
     vm_cams_dropped_near_wyn = 0
+    vm_type4_speed_added = 0
+    vm_type4_redlight_added = 0
+    vm_type4_surveillance_added = 0
     vm_tolls_added = 0
     vm_tolls_dropped_near_wyn = 0
     vm_signs_added = Counter()
@@ -318,6 +449,10 @@ def build_clean_alerts(
 
         # 2. Biển giới hạn tốc độ (Type 1)
         elif p.type == 1:
+            # Loại bỏ triệt để biển 40 km/h "ma" và các giá trị bất thường
+            if p.speed_limit <= 40 or p.speed_limit not in (50, 60, 70, 80, 90, 100, 120):
+                continue
+
             seed = f"sign|1|{lat_e7}|{lon_e7}|{hd}".encode()
             sid = 0x80000000 | (zlib.crc32(seed) & 0x7FFFFFFF)
             while sid in used_sign_ids:
@@ -396,6 +531,7 @@ def build_clean_alerts(
                 "speed": 0,
                 "heading": hd,
                 "source": "VietMap",
+                "flags": 1, # Flag 1 = Visual-only / Silent (chống rác âm thanh khi chỉ là vạch sơn)
                 "reserved": 1,
             })
             vm_signs_added["Bắt đầu cấm vượt (Type 5)"] += 1
@@ -417,6 +553,7 @@ def build_clean_alerts(
                 "speed": 0,
                 "heading": hd,
                 "source": "VietMap",
+                "flags": 1, # Flag 1 = Visual-only / Silent
                 "reserved": 1,
             })
             vm_signs_added["Hết cấm vượt (Type 6)"] += 1
@@ -451,6 +588,7 @@ def build_clean_alerts(
                     "speed": 0,
                     "heading": DIR_OMNI,
                     "source": "VietMap",
+                    "flags": 0,
                     "reserved": 1,
                 })
                 vm_tolls_added += 1
@@ -472,14 +610,98 @@ def build_clean_alerts(
                 "speed": 0,
                 "heading": hd,
                 "source": "VietMap",
+                "flags": 0,
                 "reserved": 1,
             })
             vm_signs_added["Hầm đường bộ (Type 9)"] += 1
 
-        # LOẠI BỎ 100% CÁC LOẠI 4, 7, 10
+        # 9. PHỤC HỒI CAMERA THỰC TẾ TỪ TYPE 4 (Phạt nguội, tốc độ, vượt đèn đỏ)
+        elif p.type == 4:
+            gx, gy = int(p.lon / CELL), int(p.lat / CELL)
+            near_speed_cam = None
+            near_other_cam = None
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for wc in wyn_cam_grid.get((gx + dx, gy + dy), []):
+                        d = haversine(p.lat, p.lon, wc["lat"], wc["lon"])
+                        if d <= 30.0:
+                            if wc["speed"] > 0 and (near_speed_cam is None or d < near_speed_cam[1]):
+                                near_speed_cam = (wc, d)
+                            elif wc["speed"] <= 0 and (near_other_cam is None or d < near_other_cam[1]):
+                                near_other_cam = (wc, d)
+
+            cam_to_add = None
+            if near_speed_cam:
+                spd = near_speed_cam[0]["speed"]
+                cam_to_add = {
+                    "source": "VietMap4_Speed",
+                    "speed": spd,
+                }
+                vm_type4_speed_added += 1
+            else:
+                # Kiểm tra gần cột đèn tín hiệu OSM <= 40m
+                near_osm_light = False
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for olat, olon in osm_light_grid.get((gx + dx, gy + dy), []):
+                            if haversine(p.lat, p.lon, olat, olon) <= 40.0:
+                                near_osm_light = True
+                                break
+                        if near_osm_light:
+                            break
+
+                if near_osm_light:
+                    cam_to_add = {
+                        "source": "VietMap4_RedLight",
+                        "speed": -1,
+                    }
+                    vm_type4_redlight_added += 1
+                elif near_other_cam:
+                    cam_to_add = {
+                        "source": "VietMap4_Surveillance",
+                        "speed": -1,
+                    }
+                    vm_type4_surveillance_added += 1
+
+            if cam_to_add:
+                # Tránh trùng lặp quá gần với camera cùng làn đã thêm (<= 15m cùng hướng)
+                is_cam_dup = False
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for ec in wyn_cam_grid.get((gx + dx, gy + dy), []):
+                            if haversine(p.lat, p.lon, ec["lat"], ec["lon"]) <= 15.0:
+                                ec_hd = ec.get("heading", DIR_OMNI)
+                                if hd == DIR_OMNI or ec_hd == DIR_OMNI or heading_diff(hd, ec_hd) <= 35:
+                                    is_cam_dup = True
+                                    break
+                        if is_cam_dup:
+                            break
+
+                if not is_cam_dup:
+                    seed = f"cam|vm4|{lat_e7}|{lon_e7}|{hd}".encode()
+                    cid = (1 << 62) | (zlib.crc32(seed) & ((1 << 62) - 1))
+                    while cid in used_cam_ids:
+                        cid = (1 << 62) | ((cid + 1) & ((1 << 62) - 1))
+                    used_cam_ids.add(cid)
+
+                    cam = {
+                        "id": cid,
+                        "lat": p.lat,
+                        "lon": p.lon,
+                        "speed": cam_to_add["speed"],
+                        "heading": hd,
+                        "source": cam_to_add["source"],
+                    }
+                    final_cameras.append(cam)
+                    wyn_cam_grid[(gx, gy)].append(cam)
+                    vm_cams_added += 1
+
+        # LOẠI BỎ 100% CÁC LOẠI 7, 10 ĐỂ CHỐNG RÁC
         # (Không làm gì, tự động bỏ qua)
 
     print(f"      + Camera VietMap bổ sung:   {vm_cams_added:,} (Loại bỏ {vm_cams_dropped_near_wyn:,} trùng WYN <=20m)")
+    if vm_type4_speed_added > 0 or vm_type4_redlight_added > 0 or vm_type4_surveillance_added > 0:
+        print(f"        * Trong đó cứu từ Type 4: {vm_type4_speed_added:,} camera tốc độ, {vm_type4_redlight_added:,} camera đèn đỏ, {vm_type4_surveillance_added:,} camera phạt nguội")
     print(f"      + Trạm thu phí bổ sung:     {vm_tolls_added:,} (Loại bỏ {vm_tolls_dropped_near_wyn:,} trùng WYN <=100m)")
     for cat_name, cnt in vm_signs_added.items():
         print(f"      + {cat_name:<25}: {cnt:,} điểm")
@@ -526,7 +748,7 @@ def build_clean_alerts(
             s["sign_type"],
             s["speed"],
             s["sub_type"],
-            0, # flags
+            s.get("flags", 0), # flags
             s["reserved"],
         ))
 
@@ -621,9 +843,13 @@ def build_clean_alerts(
         "content_sha256": content_sha,
         "counts_by_source_and_type": {
             "WYN": {"camera": wyn_cam_count, "light": wyn_light_count, "toll": wyn_toll_count},
-            "CURATED": {"camera": curated_cam_count},
+            "OSM": {"light": osm_lights_added_count},
+            "CURATED": {"camera": curated_cam_count, "sign": curated_sign_count},
             "VietMap": {
-                "camera": vm_cams_added,
+                "camera_total": vm_cams_added,
+                "type4_speed_cam": vm_type4_speed_added,
+                "type4_redlight_cam": vm_type4_redlight_added,
+                "type4_surveillance_cam": vm_type4_surveillance_added,
                 "speed": vm_signs_added["Biển tốc độ (Type 1)"],
                 "kdc": vm_signs_added["Vào KDC (Type 2)"] + vm_signs_added["Hết KDC (Type 3)"],
                 "no_overtaking": vm_signs_added["Bắt đầu cấm vượt (Type 5)"] + vm_signs_added["Hết cấm vượt (Type 6)"],
@@ -664,11 +890,38 @@ def build_clean_alerts(
     }
 
 
+def find_default_wyn() -> Path:
+    candidates = [
+        REPO_ROOT / "data-pipeline" / "sources" / "wyn" / "wyn_points.csv",
+        REPO_ROOT / "sources" / "wyn" / "wyn_points.csv",
+        Path(__file__).resolve().parent / "sources" / "wyn" / "wyn_points.csv",
+    ]
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
+def find_default_vietmap() -> Path:
+    candidates = [
+        REPO_ROOT / "VietHUD" / "data" / "vietmap" / "secrect.bin",
+        REPO_ROOT / "sources" / "vietmap" / "secrect.bin",
+        Path(__file__).resolve().parent / "sources" / "vietmap" / "secrect.bin",
+    ]
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
+def find_default_out() -> Path:
+    candidates = [
+        REPO_ROOT / "VietHUD" / "speedmap",
+        REPO_ROOT / "alerts_out",
+        Path(__file__).resolve().parent / "alerts_out",
+    ]
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build clean nationwide alert dataset for MapViet.")
-    parser.add_argument("--wyn", type=Path, default=REPO_ROOT / "data-pipeline" / "sources" / "wyn" / "wyn_points.csv")
-    parser.add_argument("--vietmap", type=Path, default=REPO_ROOT / "VietHUD" / "data" / "vietmap" / "secrect.bin")
-    parser.add_argument("--out", type=Path, default=REPO_ROOT / "VietHUD" / "speedmap")
+    parser.add_argument("--wyn", type=Path, default=find_default_wyn())
+    parser.add_argument("--vietmap", type=Path, default=find_default_vietmap())
+    parser.add_argument("--out", type=Path, default=find_default_out())
     parser.add_argument("--version", type=str, default=None)
     parser.add_argument("--alerts-only", action="store_true", default=False, help="Chỉ đưa cameras.bin và signs.bin vào manifest")
     args = parser.parse_args()

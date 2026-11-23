@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# Bản sao từ VietHUD/tools/sign_manifest.py — nguồn chuẩn là VietHUD/tools; sửa ở đó rồi chép lại
 """tools/sign_manifest.py — Ký và xác thực manifest dữ liệu VietHUD bằng khoá MapViet.
 
 Quy định khoá:
@@ -17,6 +16,8 @@ Quy định khoá:
   ECDSA P-256 / SHA-256 trên toàn bộ byte thô của manifest.txt, DER-encoded,
   mã hoá Base64 kèm ký tự xuống dòng '\\n'.
 """
+
+from __future__ import annotations
 
 import argparse
 import base64
@@ -106,7 +107,7 @@ def sign_manifest(manifest: Path, key=None) -> Path:
     data = manifest.read_bytes()
     sig_str = sign_data(data, key)
     out = manifest.with_name(manifest.name + ".sig")
-    out.write_text(sig_str, encoding="ascii", newline="\n")
+    out.write_bytes(sig_str.encode("ascii"))
     return out
 
 

@@ -1,0 +1,5 @@
+id,lat,lon,sign_type,sub_type,speed,heading,name
+2147580101,20.989626,106.540641,6,0,0,65535,Đèn tín hiệu Ngã tư An Lưu - Kinh Môn
+2147580102,20.986493,106.550223,6,0,0,65535,Đèn tín hiệu Ngã tư Hiệp Sơn - Kinh Môn
+2147580103,20.982357,106.563099,6,0,0,65535,Đèn tín hiệu Ngã tư Thị trấn Phú Thứ - Kinh Môn
+2147580104,21.041227,106.593174,6,0,0,65535,Đèn tín hiệu Ngã tư Minh Tân - Kinh Môn

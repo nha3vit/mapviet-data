@@ -865,8 +865,10 @@ def build_clean_alerts(
     print(f"      [OK] Đã tạo {stats_file.name} (content_sha256: {content_sha})")
 
     # Ký manifest bằng khoá MapViet
-    key_file = REPO_ROOT / "Key" / "mapviet_signing_key.pem"
-    if not key_file.exists():
+    key_file = None
+    if (REPO_ROOT / "Key" / "mapviet_signing_key.pem").exists():
+        key_file = REPO_ROOT / "Key" / "mapviet_signing_key.pem"
+    elif (Path.home() / ".mapviet" / "mapviet_signing_key.pem").exists():
         key_file = Path.home() / ".mapviet" / "mapviet_signing_key.pem"
 
     priv_key = sign_manifest.load_private_key(key_file)

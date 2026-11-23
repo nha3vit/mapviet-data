@@ -169,7 +169,7 @@ def build_clean_alerts(
                 "speed": 0,
                 "heading": DIR_OMNI,
                 "source": "WYN",
-                "reserved": 2, # WYN
+                "reserved": 3, # WYN / OSM (reserved=3 yêu cầu AlertPointMerger bỏ qua lights.bin)
             }
             final_signs.append(sign)
             wyn_light_count += 1
@@ -190,14 +190,44 @@ def build_clean_alerts(
                 "speed": 0,
                 "heading": DIR_OMNI,
                 "source": "WYN",
-                "reserved": 2, # WYN
+                "reserved": 3, # WYN / OSM
             }
             final_signs.append(sign)
             gx, gy = int(lon / CELL), int(lat / CELL)
             wyn_toll_grid[(gx, gy)].append(sign)
             wyn_toll_count += 1
 
+    # Nạp camera kiểm chứng thực tế (Curated/Custom Cameras)
+    curated_cams_path = wyn_csv.parent.parent / "curated" / "custom_cameras.csv"
+    curated_cam_count = 0
+    if curated_cams_path.exists():
+        with open(curated_cams_path, "r", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                try:
+                    cid = int(r["id"])
+                    lat = float(r["lat"])
+                    lon = float(r["lon"])
+                    hd = int(r["heading"])
+                    spd = clean_camera_speed(int(r["speed"]))
+                    cam = {
+                        "id": cid,
+                        "lat": lat,
+                        "lon": lon,
+                        "speed": spd,
+                        "heading": hd,
+                        "source": "CURATED",
+                    }
+                    final_cameras.append(cam)
+                    used_cam_ids.add(cid)
+                    gx, gy = int(lon / CELL), int(lat / CELL)
+                    wyn_cam_grid[(gx, gy)].append(cam)
+                    curated_cam_count += 1
+                except Exception:
+                    pass
+
     print(f"      + Camera WYN giữ lại:       {wyn_cam_count:,} điểm")
+    if curated_cam_count > 0:
+        print(f"      + Camera thực tế bổ sung:   {curated_cam_count:,} điểm (Cầu Hiệp Thượng, v.v.)")
     print(f"      + Đèn tín hiệu OSM/WYN:    {wyn_light_count:,} điểm")
     print(f"      + Trạm thu phí WYN:        {wyn_toll_count:,} điểm")
 
@@ -591,6 +621,7 @@ def build_clean_alerts(
         "content_sha256": content_sha,
         "counts_by_source_and_type": {
             "WYN": {"camera": wyn_cam_count, "light": wyn_light_count, "toll": wyn_toll_count},
+            "CURATED": {"camera": curated_cam_count},
             "VietMap": {
                 "camera": vm_cams_added,
                 "speed": vm_signs_added["Biển tốc độ (Type 1)"],

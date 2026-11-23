@@ -14,7 +14,10 @@ on:
     paths:
       - "sources/vietmap/**"
       - "sources/wyn/**"
+      - "sources/curated/**"
+      - "sources/osm/**"
       - "alerts.py"
+      - "build_clean_alerts.py"
       - "vietmap_decode.py"
       - "sign_manifest.py"
       - "validate_speedmap.py"

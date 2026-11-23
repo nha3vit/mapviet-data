@@ -5,3 +5,5 @@ out/
 release/
 pipe_home/
 viethud/
+__pycache__/
+*.pyc

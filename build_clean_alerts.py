@@ -113,7 +113,7 @@ def build_clean_alerts(
     alerts_only: bool = False,
     curated_dir: Path | None = None,
     osm_gt_path: Path | None = None,
-    sign: bool = True,
+    sign_output: bool = True,
 ):
     print("=" * 70)
     print("  KHỞI TẠO BỘ ĐÓNG GÓI CẢNH BÁO TOÀN QUỐC MAPVIET")
@@ -889,7 +889,7 @@ def build_clean_alerts(
         json.dump(stats, f, indent=2)
     print(f"      [OK] Đã tạo {stats_file.name} (content_sha256: {content_sha})")
 
-    if sign:
+    if sign_output:
         # Ký manifest bằng khoá MapViet
         key_file = None
         if (REPO_ROOT / "Key" / "mapviet_signing_key.pem").exists():
@@ -907,7 +907,7 @@ def build_clean_alerts(
             raise ValueError(f"Xác thực chữ ký manifest thất bại!")
         print(f"      [OK] Chữ ký manifest đã được xác thực hợp lệ 100%!")
     else:
-        print("      [INFO] Bỏ qua ký số manifest (sign=False)")
+        print("      [INFO] Bỏ qua ký số manifest (sign_output=False)")
 
     print("\n" + "=" * 70)
     print("  HOÀN TẤT ĐÓNG GÓI GÓI CẢNH BÁO TOÀN QUỐC THÀNH CÔNG!")

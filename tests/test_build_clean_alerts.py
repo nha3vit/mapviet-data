@@ -108,7 +108,7 @@ class TestBuildCleanAlertsRules(unittest.TestCase):
             alerts_only=True,
             curated_dir=empty_curated,
             osm_gt_path=osm_gt,
-            sign=False,
+            sign_output=False,
         )
         stats = json.loads((out_dir / "stats.json").read_text(encoding="utf-8"))
         cams = _read_cameras(out_dir / "cameras.bin")

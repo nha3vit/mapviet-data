@@ -19,8 +19,8 @@ concurrency:
 
 env:
   PBF_URL: https://download.geofabrik.de/asia/vietnam/vietnam-latest.osm.pbf
-  VIETHUD_REPO: https://github.com/nha3vit/VietHUD.git
-  VIETHUD_REF: ba3e13dde2f9c1333e537ac8d2487329b75b834c   # pinned pipeline commit on nha3vit/VietHUD
+  VIETHUD_REPO: https://github.com/911273/VietHUD.git
+  VIETHUD_REF: f9f4ca283860ee873e8c5d5ed715036c75818d10   # public canonical VietHUD pipeline (matches local tools/viethud-pipeline)
   RELEASE_TAG: roads
 
 jobs:

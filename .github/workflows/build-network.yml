@@ -1,6 +1,7 @@
 # Copy this file to <owner>/mapviet-data : .github/workflows/build-network.yml
 # Builds the MapViet road-network pack from the latest OpenStreetMap Vietnam
-# extract every day and publishes it as a GitHub Release ("latest").
+# extract every day and publishes it to the fixed release tag "roads" (marked "latest").
+# App URL: https://github.com/<owner>/mapviet-data/releases/download/roads/manifest.txt
 # Required repo secret: MAPVIET_SIGNING_KEY  (EC P-256 private key, PEM text)
 name: build-network
 
@@ -18,8 +19,9 @@ concurrency:
 
 env:
   PBF_URL: https://download.geofabrik.de/asia/vietnam/vietnam-latest.osm.pbf
-  VIETHUD_REPO: https://github.com/911273/VietHUD.git
-  VIETHUD_REF: 1f1f986          # pinned pipeline version (bump deliberately)
+  VIETHUD_REPO: https://github.com/nha3vit/VietHUD.git
+  VIETHUD_REF: ba3e13dde2f9c1333e537ac8d2487329b75b834c   # pinned pipeline commit on nha3vit/VietHUD
+  RELEASE_TAG: roads
 
 jobs:
   build:
@@ -33,7 +35,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: pip install "osmium>=3.6,<5"
+        run: pip install "osmium>=3.6,<5" cryptography==50.0.1
+
+      - name: Unit tests
+        run: python -m unittest test_postprocess test_urban_flags -v
 
       - name: Download OSM Vietnam (verify md5)
         run: |
@@ -51,9 +56,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          last=$(gh release view --json body -q .body 2>/dev/null | grep '^osm_date:' | cut -d' ' -f2- || true)
-          if [ "$last" = "$OSM_DATE" ] && [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "OSM unchanged ($OSM_DATE)"
+          last=$(gh release view "$RELEASE_TAG" --json body -q .body 2>/dev/null | grep '^osm_date:' | cut -d' ' -f2- || true)
+          assets_ok=true
+          if ! assets_json=$(gh release view "$RELEASE_TAG" --json assets -q '[.assets[].name]' 2>/dev/null); then
+            assets_ok=false
+          else
+            for req in manifest.txt manifest.txt.sig metadata.bin.gz index.bin.gz tiles.bin.gz names.bin.gz seg_names.bin.gz lights.bin.gz osm_signs.bin.gz; do
+              if ! printf '%s\n' "$assets_json" | grep -Fq "\"$req\""; then
+                assets_ok=false
+                break
+              fi
+            done
+          fi
+          if [ "$last" = "$OSM_DATE" ] && [ "$assets_ok" = "true" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "OSM unchanged ($OSM_DATE) and roads release assets complete"
           fi
 
       - name: Fetch VietHUD pipeline (pinned)
@@ -90,15 +106,47 @@ jobs:
           python postprocess.py out release
           rm -f "$RUNNER_TEMP/key.pem"
 
-      - name: Publish release
+      - name: Verify release package
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          tmpdir=$(mktemp -d)
+          cp release/manifest.txt release/manifest.txt.sig release/osm_signs.bin.gz "$tmpdir/"
+          python verify_road_signs.py "$tmpdir"
+          rm -rf "$tmpdir"
+          python - <<'EOF'
+          import gzip, hashlib, pathlib
+          rel = pathlib.Path("release")
+          lines = (rel / "manifest.txt").read_text(encoding="utf-8").splitlines()
+          entries = lines[1:]
+          assert len(entries) == 7, f"Expected 7 manifest entries, got {len(entries)}"
+          for line in entries:
+              fn, size_s, sha, gz_s = line.split()
+              gz_p = rel / f"{fn}.gz"
+              assert gz_p.exists(), f"Missing {gz_p}"
+              assert gz_p.stat().st_size == int(gz_s), f"GZ size mismatch for {fn}"
+              h = hashlib.sha256()
+              total = 0
+              with gzip.open(gz_p, "rb") as f:
+                  while chunk := f.read(1 << 20):
+                      h.update(chunk)
+                      total += len(chunk)
+              assert total == int(size_s), f"Raw size mismatch for {fn}"
+              assert h.hexdigest() == sha.lower(), f"SHA-256 mismatch for {fn}"
+          print(f"Verified all {len(entries)} compressed assets in release/")
+          EOF
+
+      - name: Publish release "roads"
         if: steps.check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd release
-          printf 'MapViet road network built from OpenStreetMap (ODbL, (c) OpenStreetMap contributors).\nosm_date: %s\nurban_segments: %s\n' "$OSM_DATE" "$URBAN_COUNT" > notes.txt
-          gh release create "network-$VERSION" --title "Network $VERSION" --notes-file notes.txt --latest \
-            manifest.txt manifest.txt.sig *.gz
-          # keep the 7 most recent network releases (never touch the fixed "alerts" release)
-          gh release list --limit 100 --json tagName -q '.[].tagName | select(startswith("network-"))' | tail -n +8 | \
-            xargs -r -n1 gh release delete --yes --cleanup-tag
+          printf 'MapViet road network built from OpenStreetMap (ODbL, (c) OpenStreetMap contributors).\nosm_date: %s\nversion: %s\nurban_segments: %s\n' "$OSM_DATE" "$VERSION" "$URBAN_COUNT" > notes.txt
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" *.gz --clobber
+            gh release upload "$RELEASE_TAG" manifest.txt manifest.txt.sig --clobber
+            gh release edit "$RELEASE_TAG" --title "MapViet Road Network (v$VERSION)" --notes-file notes.txt --latest
+          else
+            gh release create "$RELEASE_TAG" --title "MapViet Road Network (v$VERSION)" --notes-file notes.txt --latest \
+              *.gz manifest.txt manifest.txt.sig
+          fi

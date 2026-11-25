@@ -296,7 +296,7 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
             )
         elif p.type == vmd.TYPE_SIGNAL:
             # Type 4: Nút giao / giao lộ theo nhánh
-            # R6: Gán Sign 10 DANGER_OTHER, subType 4 (chỉ vẽ trên bản đồ, tuyệt đối không đọc tiếng)
+            # R6: Gán Sign 10 DANGER_OTHER, subType 4, flags=1 (chỉ vẽ trên bản đồ, tuyệt đối không đọc tiếng)
             pt = AlertPoint(
                 lat=p.lat,
                 lon=p.lon,
@@ -309,6 +309,7 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 desc="VietMap Junction (Visual Only)",
                 kind="sign",
                 sub_type=4,
+                flags=1,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
@@ -347,7 +348,7 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 decoded_heading=p.heading,
             )
         elif p.type == vmd.TYPE_UNCLEAR_7:
-            # Type 7: Sign 10 DANGER_OTHER, subType 7 (chú ý đoạn đường phía trước), speed = 0
+            # Type 7: Sign 10 DANGER_OTHER, subType 7 (95,2% trùng WYN sign_10 -> Visual Only, không đọc rác)
             pt = AlertPoint(
                 lat=p.lat,
                 lon=p.lon,
@@ -357,9 +358,10 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 is_camera=False,
                 source="VietMap",
                 priority=PRIORITY_VIETMAP,
-                desc="VietMap Attention Caution",
+                desc="VietMap Attention Caution (Visual Only)",
                 kind="sign",
                 sub_type=7,
+                flags=1,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
@@ -377,6 +379,7 @@ def load_vietmap_alerts(secrect_bin_path: Path) -> tuple[list[AlertPoint], str]:
                 desc="VietMap High Speed Warning (Visual Only)",
                 kind="sign",
                 sub_type=10,
+                flags=1,
                 original_type=p.type,
                 decoded_heading=p.heading,
             )
@@ -534,6 +537,7 @@ def load_wyn_alerts(csv_path: Path) -> list[AlertPoint]:
                     priority=PRIORITY_WYN,
                     desc=f"WYN Sign {stype}",
                     kind="sign",
+                    flags=1 if stype == 10 else 0,
                 ))
 
     print(f"      -> Nạp thành công: {len(points):,} điểm WYN")

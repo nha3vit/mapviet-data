@@ -27,6 +27,8 @@ INDEX_ENTRY_SIZE = struct.calcsize(INDEX_ENTRY_FMT)
 FLAG_URBAN = 0x40
 
 URBAN_LANDUSE = {"residential", "commercial", "retail", "industrial"}
+URBAN_PLACE_AREAS = {"city", "town", "suburb", "quarter", "neighbourhood"}
+URBAN_ADMIN_PREFIXES = ("phường ", "thị trấn ")
 RADIUS_BY_PLACE = {
     "city": 3000.0,
     "town": 1500.0,
@@ -129,7 +131,19 @@ def parse_osm_xml(osm_file, index: UrbanIndex):
     import xml.etree.ElementTree as ET
 
     nodes = {}  # id -> (lat, lon)
+    ways = {}   # id -> list of (lat, lon)
     context = ET.iterparse(osm_file, events=("end",))
+
+    def is_urban_tags(tags: dict) -> bool:
+        if tags.get("landuse") in URBAN_LANDUSE:
+            return True
+        if tags.get("place") in URBAN_PLACE_AREAS:
+            return True
+        if tags.get("boundary") == "administrative":
+            name = (tags.get("name") or "").strip().lower()
+            if name.startswith(URBAN_ADMIN_PREFIXES):
+                return True
+        return False
 
     for event, elem in context:
         tag = elem.tag
@@ -147,18 +161,28 @@ def parse_osm_xml(osm_file, index: UrbanIndex):
             elem.clear()
 
         elif tag == "way":
-            is_urban_landuse = False
-            for child in elem:
-                if child.tag == "tag" and child.get("k") == "landuse":
-                    if child.get("v") in URBAN_LANDUSE:
-                        is_urban_landuse = True
+            way_id = elem.get("id")
+            tags = {c.get("k"): c.get("v") for c in elem if c.tag == "tag"}
+            refs = [c.get("ref") for c in elem if c.tag == "nd"]
+            coords = [nodes[r] for r in refs if r in nodes]
+            if way_id and coords:
+                ways[way_id] = coords
 
-            if is_urban_landuse:
-                refs = [c.get("ref") for c in elem if c.tag == "nd"]
-                if len(refs) >= 4 and refs[0] == refs[-1]:
-                    coords = [nodes[r] for r in refs if r in nodes]
-                    if len(coords) >= 4:
-                        index.add_polygon(coords)
+            if is_urban_tags(tags) and len(refs) >= 4 and refs[0] == refs[-1] and len(coords) >= 4:
+                index.add_polygon(coords)
+            elem.clear()
+
+        elif tag == "relation":
+            tags = {c.get("k"): c.get("v") for c in elem if c.tag == "tag"}
+            if is_urban_tags(tags):
+                outer_rings = []
+                for child in elem:
+                    if child.tag == "member" and child.get("type") == "way" and child.get("role") in ("outer", ""):
+                        wcoords = ways.get(child.get("ref"))
+                        if wcoords and len(wcoords) >= 4 and wcoords[0] == wcoords[-1]:
+                            outer_rings.append(wcoords)
+                for ring in outer_rings:
+                    index.add_polygon(ring)
             elem.clear()
 
 
@@ -179,12 +203,18 @@ def parse_osm_pbf(osm_file, index: UrbanIndex):
             if place in RADIUS_BY_PLACE:
                 self.idx.add_place(n.location.lat, n.location.lon, RADIUS_BY_PLACE[place])
 
-        def way(self, w):
-            landuse = w.tags.get("landuse")
-            if landuse in URBAN_LANDUSE and w.is_closed() and len(w.nodes) >= 4:
+        def area(self, a):
+            landuse = a.tags.get("landuse")
+            place = a.tags.get("place")
+            boundary = a.tags.get("boundary")
+            name = (a.tags.get("name") or "").strip().lower()
+            is_admin_urban = (boundary == "administrative") and name.startswith(URBAN_ADMIN_PREFIXES)
+            if landuse in URBAN_LANDUSE or place in URBAN_PLACE_AREAS or is_admin_urban:
                 try:
-                    coords = [(pt.lat, pt.lon) for pt in w.nodes]
-                    self.idx.add_polygon(coords)
+                    for outer_ring in a.outer_rings():
+                        coords = [(pt.lat, pt.lon) for pt in outer_ring]
+                        if len(coords) >= 4:
+                            self.idx.add_polygon(coords)
                 except osmium.InvalidLocationError:
                     pass
 

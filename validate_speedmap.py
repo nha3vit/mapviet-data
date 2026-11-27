@@ -27,6 +27,8 @@ Các hạng mục kiểm định:
   8. trùng lặp gần: Số cặp camera cùng hướng cách nhau < 5m (Cảnh báo, không phải lỗi).
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json

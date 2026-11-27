@@ -251,6 +251,33 @@ class TestBuildCleanAlertsRules(unittest.TestCase):
             self.assertEqual(wyn_pts[0].sign_type, 10)
             self.assertEqual(wyn_pts[0].flags, 1)
 
+    def test_type4_ignores_perpendicular_overpass_and_never_inherits_40_kmh(self):
+        with tempfile.TemporaryDirectory() as td:
+            cams, _, _ = self._run_build(
+                Path(td),
+                wyn_rows=[
+                    # Camera cao tốc CT.04 cắt ngang (102°, 120 km/h) bên trên ĐT.391 (170°/350°)
+                    {"lat": "20.846072", "lon": "106.378200", "kind": "camera", "sign_type": "", "speed_kmh": "120", "heading": "102"},
+                    # Camera nhánh rẽ 40 km/h hướng 188° cạnh CT.04 (86°) và một điểm đối diện 8°
+                    {"lat": "20.858680", "lon": "106.299400", "kind": "camera", "sign_type": "", "speed_kmh": "40", "heading": "188"},
+                ],
+                vm_records=[
+                    # ĐT.391 hướng 170° và 350°: cắt vuông góc (68° / 112°) -> KHÔNG được ghép từ camera CT.04 102°
+                    "106.378202,20.846073,4,0,0,170",
+                    "106.378287,20.846081,4,0,0,350",
+                    # CT.04 hướng 86° cắt ngang 188° (102°) -> KHÔNG được ghép
+                    "106.299684,20.858729,4,0,0,86",
+                    # Đối hướng 8° của 188° (180°) -> được cứu hướng nhưng KHÔNG kế thừa <= 40 km/h (phải quy về -1)
+                    "106.299410,20.858700,4,0,0,8",
+                ],
+            )
+            # Chỉ giữ 2 camera WYN gốc + 1 điểm cứu hướng 8° với speed=-1
+            self.assertEqual(len(cams), 3)
+            self.assertFalse(any(c["heading"] in (170, 350, 86) for c in cams))
+            rescued_opp = [c for c in cams if c["heading"] == 8]
+            self.assertEqual(len(rescued_opp), 1)
+            self.assertEqual(rescued_opp[0]["speed"], -1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,12 +16,10 @@ on:
       - "sources/wyn/**"
       - "sources/curated/**"
       - "sources/osm/**"
-      - "alerts.py"
       - "build_clean_alerts.py"
       - "vietmap_decode.py"
       - "sign_manifest.py"
       - "validate_speedmap.py"
-      - "validate_alerts.py"
       - "verify_viethud.py"
       - "tests/**"
       - ".github/workflows/build-alerts.yml"
@@ -72,6 +70,10 @@ jobs:
           test -s alerts_out/manifest.txt.sig
           echo "CONTENT_SHA=$(python -c 'import json;print(json.load(open("alerts_out/stats.json"))["content_sha256"])')" >> "$GITHUB_ENV"
 
+      - name: Validate alert pack
+        run: |
+          python validate_speedmap.py alerts_out --alerts-only
+
       - name: Skip if content unchanged
         id: check
         env:
@@ -103,13 +105,17 @@ jobs:
           print(f"total_points: {s.get('total_points', 0)} (WYN {sum(wyn_cnt.values()):,} + OSM Lights {osm_cnt.get('light', 0):,} + Curated {sum(cur_cnt.values()):,} + VietMap {sum(vm_cnt.values()):,})")
           print(f"cameras: {s.get('cameras_count', 0)} (WYN {wyn_cnt.get('camera', 0):,} + Curated {cur_cnt.get('camera', 0):,} + VietMap {vm_cnt.get('camera_total', 0):,})")
           print(f"signs: {s.get('signs_count', 0)}")
-          print("\n• Tích hợp đầy đủ kho 11.316 đèn tín hiệu thực địa từ OpenStreetMap (OSM) vào toàn quốc, khử trùng lặp và gom cụm ngã tư thành 6.269 điểm đèn tín hiệu thực tế.")
-          print("• Bổ sung các cụm đèn tín hiệu thực địa tại thị xã Kinh Môn (An Lưu, Hiệp Sơn, Phú Thứ, Minh Tân).")
-          print("• Bảo đảm 100% Cầu Hiệp Thượng sạch bóng đèn đỏ ảo, duy trì 2 camera phạt nguội thực tế.")
+          print("\n• Tích hợp kho đèn tín hiệu thực địa OSM + WYN + Curated toàn quốc (6.269 điểm ngã tư).")
+          print("• Khử trùng lặp nội bộ WYN <= 30m cùng hướng và chặn VietMap Type 4 cứu hướng kế thừa nhầm tốc độ từ nhánh phụ <= 40 km/h hoặc cầu vượt cắt ngang.")
           print("• Đã ký số xác thực ECDSA P-256 bằng khoá MapViet.")
           print(f"content_sha256: {s['content_sha256']}")
           EOF
           cat notes.txt
-          gh release upload "$RELEASE_TAG" cameras.bin signs.bin stats.json --clobber
-          gh release upload "$RELEASE_TAG" manifest.txt manifest.txt.sig --clobber
-          gh release edit "$RELEASE_TAG" --title "MapViet Clean Nationwide Alert Pack (v$(python -c 'import json; print(json.load(open("stats.json"))["version"])'))" --notes-file notes.txt --latest=false
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" cameras.bin signs.bin stats.json --clobber
+            gh release upload "$RELEASE_TAG" manifest.txt manifest.txt.sig --clobber
+            gh release edit "$RELEASE_TAG" --title "MapViet Clean Nationwide Alert Pack (v$(python -c 'import json; print(json.load(open("stats.json"))["version"])'))" --notes-file notes.txt --latest=false
+          else
+            gh release create "$RELEASE_TAG" --title "MapViet Clean Nationwide Alert Pack (v$(python -c 'import json; print(json.load(open("stats.json"))["version"])'))" --notes-file notes.txt \
+              --latest=false cameras.bin signs.bin stats.json manifest.txt manifest.txt.sig
+          fi

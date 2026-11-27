@@ -37,6 +37,38 @@ SAMPLE_OSM_XML = """<?xml version="1.0" encoding="UTF-8"?>
     <nd ref="2001"/>
     <tag k="landuse" v="residential"/>
   </way>
+
+  <!-- Administrative boundary: Phường Bãi Cháy (nội thành Hạ Long) -->
+  <node id="4001" lat="20.9500000" lon="107.0200000"/>
+  <node id="4002" lat="20.9600000" lon="107.0200000"/>
+  <node id="4003" lat="20.9600000" lon="107.0400000"/>
+  <node id="4004" lat="20.9500000" lon="107.0400000"/>
+  <way id="4101">
+    <nd ref="4001"/>
+    <nd ref="4002"/>
+    <nd ref="4003"/>
+    <nd ref="4004"/>
+    <nd ref="4001"/>
+    <tag k="boundary" v="administrative"/>
+    <tag k="admin_level" v="8"/>
+    <tag k="name" v="Phường Bãi Cháy"/>
+  </way>
+
+  <!-- Administrative boundary: Xã rural (must NOT be tagged urban) -->
+  <node id="5001" lat="20.8000000" lon="106.3000000"/>
+  <node id="5002" lat="20.8100000" lon="106.3000000"/>
+  <node id="5003" lat="20.8100000" lon="106.3100000"/>
+  <node id="5004" lat="20.8000000" lon="106.3100000"/>
+  <way id="5101">
+    <nd ref="5001"/>
+    <nd ref="5002"/>
+    <nd ref="5003"/>
+    <nd ref="5004"/>
+    <nd ref="5001"/>
+    <tag k="boundary" v="administrative"/>
+    <tag k="admin_level" v="8"/>
+    <tag k="name" v="Xã An Bình"/>
+  </way>
 </osm>
 """
 
@@ -79,6 +111,10 @@ class TestUrbanFlags(unittest.TestCase):
         self.assertTrue(index.is_urban(20.9860, 106.5110))
         # Point inside residential polygon
         self.assertTrue(index.is_urban(20.9050, 106.4050))
+        # Point inside Phường Bãi Cháy admin boundary
+        self.assertTrue(index.is_urban(20.9550, 107.0300))
+        # Point inside rural Xã An Bình admin boundary (must remain False)
+        self.assertFalse(index.is_urban(20.8050, 106.3050))
         # Point far away in rural area
         self.assertFalse(index.is_urban(20.7000, 106.2000))
         # Point 3km away from town (town radius is 1500m)

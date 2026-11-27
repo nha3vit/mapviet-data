@@ -4,6 +4,8 @@
 verify_road_signs.py — Xác thực chữ ký MapViet và tính toàn vẹn của osm_signs.bin từ release mạng đường OSM.
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import gzip

@@ -4,6 +4,8 @@
 verify_viethud.py — Kiểm tra chữ ký ECDSA và toàn vẹn dữ liệu (size + SHA256) của gói VietHUD speedmap.
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import hashlib

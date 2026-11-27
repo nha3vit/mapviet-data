@@ -15,6 +15,8 @@ Quy trình:
    - Ghi secrect.bin và vietmap_manifest.json vào thư mục đích (mặc định sources/vietmap)
 """
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import hashlib

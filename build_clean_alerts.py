@@ -91,6 +91,14 @@ def is_same_heading(hd1: int, hd2: int, tol_deg: int = CAM_SAME_HEADING_DEG) -> 
     return hd1 == DIR_OMNI or hd2 == DIR_OMNI or heading_diff(hd1, hd2) <= tol_deg
 
 
+def is_collinear_or_opposite(hd1: int, hd2: int, tol_deg: int = CAM_SAME_HEADING_DEG) -> bool:
+    """Cùng trục đường (cùng chiều <= tol_deg hoặc đối chiều >= 180 - tol_deg), loại cầu vượt/nhánh rẽ cắt ngang."""
+    if hd1 == DIR_OMNI or hd2 == DIR_OMNI:
+        return True
+    d = heading_diff(hd1, hd2)
+    return d <= tol_deg or d >= (180 - tol_deg)
+
+
 def iter_grid_neighbors(grid, gx: int, gy: int, span: int = 1):
     for dx in range(-span, span + 1):
         for dy in range(-span, span + 1):
@@ -113,6 +121,7 @@ def build_clean_alerts(
     alerts_only: bool = False,
     curated_dir: Path | None = None,
     osm_gt_path: Path | None = None,
+    osm_signs_path: Path | None = None,
     sign_output: bool = True,
 ):
     print("=" * 70)
@@ -165,6 +174,21 @@ def build_clean_alerts(
 
         if kind == "camera":
             spd = clean_camera_speed(raw_spd)
+            gx, gy = int(lon / CELL), int(lat / CELL)
+            # Khử trùng nội bộ WYN trong <= 30m cùng hướng (giữ bản ghi có tốc độ cụ thể nếu có)
+            dup_wyn = next(
+                (
+                    wc for wc in iter_grid_neighbors(raw_wyn_cam_grid, gx, gy)
+                    if haversine(lat, lon, wc["lat"], wc["lon"]) <= RADIUS_CAM_DEDUP_M
+                    and is_same_heading(hd, wc["heading"])
+                ),
+                None,
+            )
+            if dup_wyn is not None:
+                if dup_wyn["speed"] <= 0 and spd > 0:
+                    dup_wyn["speed"] = spd
+                continue
+
             seed = f"cam|wyn|{lat_e7}|{lon_e7}|{hd}".encode()
             cid = (1 << 62) | (zlib.crc32(seed) & ((1 << 62) - 1))
             while cid in used_cam_ids:
@@ -180,7 +204,6 @@ def build_clean_alerts(
                 "source": "WYN",
             }
             final_cameras.append(cam)
-            gx, gy = int(lon / CELL), int(lat / CELL)
             raw_wyn_cam_grid[(gx, gy)].append(cam)
             all_cam_grid[(gx, gy)].append(cam)
             wyn_cam_count += 1
@@ -316,16 +339,31 @@ def build_clean_alerts(
     osm_lights = []
     osm_light_grid = defaultdict(list)
     osm_lights_added_count = 0
-    if osm_gt_path is not None and osm_gt_path.exists():
+    if (osm_gt_path is not None and osm_gt_path.exists()) or (osm_signs_path is not None and osm_signs_path.exists()):
         try:
-            with open(osm_gt_path, "r", encoding="utf-8") as f:
-                import json
-                gt = json.load(f)
-                osm_lights = gt.get("traffic_signals", [])
-                for lat, lon in osm_lights:
-                    gx, gy = int(lon / CELL), int(lat / CELL)
-                    osm_light_grid[(gx, gy)].append((lat, lon))
-            print(f"      + Tọa độ đèn tín hiệu OSM nạp từ ground truth: {len(osm_lights):,} điểm")
+            if osm_gt_path is not None and osm_gt_path.exists():
+                with open(osm_gt_path, "r", encoding="utf-8") as f:
+                    import json
+                    gt = json.load(f)
+                    osm_lights = gt.get("traffic_signals", [])
+                print(f"      + Tọa độ đèn tín hiệu OSM nạp từ ground truth: {len(osm_lights):,} điểm")
+            elif osm_signs_path is not None and osm_signs_path.exists():
+                sdata = osm_signs_path.read_bytes()
+                hdr_size = struct.calcsize(SIGN_HEADER_FMT)
+                pt_size = struct.calcsize(SIGN_POINT_FMT)
+                if len(sdata) >= hdr_size:
+                    _, _, cnt, _, _, _ = struct.unpack_from(SIGN_HEADER_FMT, sdata, 0)
+                    for idx_s in range(cnt):
+                        _, lat_e7, lon_e7, _, stype, _, _, _, _ = struct.unpack_from(
+                            SIGN_POINT_FMT, sdata, hdr_size + idx_s * pt_size
+                        )
+                        if stype == 6:
+                            osm_lights.append([lat_e7 / 1e7, lon_e7 / 1e7])
+                print(f"      + Tọa độ đèn tín hiệu OSM nạp từ {osm_signs_path.name}: {len(osm_lights):,} điểm")
+
+            for lat, lon in osm_lights:
+                gx, gy = int(lon / CELL), int(lat / CELL)
+                osm_light_grid[(gx, gy)].append((lat, lon))
 
             for lat, lon in osm_lights:
                 gx, gy = int(lon / CELL), int(lat / CELL)
@@ -652,7 +690,7 @@ def build_clean_alerts(
         # LOẠI BỎ 100% CÁC LOẠI 7, 10 ĐỂ CHỐNG RÁC
         # (Không làm gì, tự động bỏ qua)
 
-    # 9b. PHỤC HỒI CAMERA CÒN THIẾU HƯỚNG TỪ TYPE 4 (chỉ khi trùng camera WYN/CURATED <= 40m)
+    # 9b. PHỤC HỒI CAMERA CÒN THIẾU HƯỚNG TỪ TYPE 4 (chỉ khi trùng camera WYN/CURATED <= 40m và CÙNG TRỤC ĐƯỜNG)
     for p in type4_candidates:
         hd = p.heading if 1 <= p.heading <= 359 else DIR_OMNI
         gx, gy = int(p.lon / CELL), int(p.lat / CELL)
@@ -660,6 +698,8 @@ def build_clean_alerts(
         near_speed_cam = None
         near_other_cam = None
         for wc in iter_grid_neighbors(raw_wyn_cam_grid, gx, gy):
+            if not is_collinear_or_opposite(hd, wc.get("heading", DIR_OMNI)):
+                continue
             d = haversine(p.lat, p.lon, wc["lat"], wc["lon"])
             if d <= RADIUS_CAM_MATCH_WYN_M:
                 if wc["speed"] > 0 and (near_speed_cam is None or d < near_speed_cam[1]):
@@ -680,10 +720,15 @@ def build_clean_alerts(
             vm_type4_dropped_dup += 1
             continue
 
-        if near_speed_cam:
+        if near_speed_cam and near_speed_cam[0]["speed"] > 40:
             cam_speed = near_speed_cam[0]["speed"]
             cam_source = "VietMap4_Speed"
             vm_type4_speed_added += 1
+        elif near_speed_cam:
+            # Không kế thừa mức <= 40 km/h (thường từ nhánh rẽ/đường gom) lên điểm cứu hướng
+            cam_speed = -1
+            cam_source = "VietMap4_Surveillance"
+            vm_type4_surveillance_added += 1
         else:
             cam_speed = -1
             near_light = any(
@@ -954,6 +999,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build clean nationwide alert dataset for MapViet.")
     parser.add_argument("--wyn", type=Path, default=find_default_wyn())
     parser.add_argument("--vietmap", type=Path, default=find_default_vietmap())
+    parser.add_argument("--osm-gt", type=Path, default=None)
+    parser.add_argument("--osm-signs", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=find_default_out())
     parser.add_argument("--version", type=str, default=None)
     parser.add_argument("--alerts-only", action="store_true", default=False, help="Chỉ đưa cameras.bin và signs.bin vào manifest")
@@ -965,4 +1012,6 @@ if __name__ == "__main__":
         output_dir=args.out,
         version_str=args.version,
         alerts_only=args.alerts_only,
+        osm_gt_path=args.osm_gt,
+        osm_signs_path=args.osm_signs,
     )

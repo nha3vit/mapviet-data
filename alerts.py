@@ -25,6 +25,8 @@ CHỈ VietMap type 11, camera WYN (kind=camera) và camera trong base/cameras.bi
 signs.bin CHỈ chứa biển/đèn (không bao giờ chứa camera).
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import hashlib

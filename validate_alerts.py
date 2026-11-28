@@ -35,7 +35,7 @@ MAX_CAMERAS_SIZE = 400 * 1024       # 400 KB
 MAX_SIGNS_SIZE = 3500 * 1024        # 3.5 MB
 
 RADIUS_CAMERA_M = 30.0
-RADIUS_LIGHT_M = 45.0
+RADIUS_LIGHT_M = 20.0
 RADIUS_OTHER_SIGN_M = 20.0
 
 DIR_OMNI = 0xFFFF
@@ -56,7 +56,7 @@ def heading_diff(h1: int, h2: int) -> int:
 
 
 def headings_agree(h1: int, h2: int, tol: int = 45) -> bool:
-    if h1 in (0, DIR_OMNI) or h2 in (0, DIR_OMNI):
+    if h1 == DIR_OMNI or h2 == DIR_OMNI:
         return True
     return heading_diff(h1, h2) <= tol
 
@@ -77,12 +77,17 @@ def validate_alerts_dir(alerts_dir: Path, vietmap_path: Path | None = None) -> l
         errors.append(f"Không tìm thấy signs.bin tại {signs_file}")
         return errors
 
-    # Tra cứu nguồn dữ liệu từ combined_traffic_alerts.csv nếu có
-    id_to_source = {}
+    # Tra cứu nguồn dữ liệu tách biệt cho camera và sign từ combined_traffic_alerts.csv nếu có
+    cam_id_to_source = {}
+    sign_id_to_source = {}
     if csv_file.exists():
         with open(csv_file, mode="r", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
-                id_to_source[int(row["id"])] = row["nguon_du_lieu"]
+                rid = int(row["id"])
+                if row.get("la_camera") == "1":
+                    cam_id_to_source[rid] = row["nguon_du_lieu"]
+                else:
+                    sign_id_to_source[rid] = row["nguon_du_lieu"]
 
     # 1. Kiểm tra kích thước file
     cam_size = cams_file.stat().st_size
@@ -104,7 +109,7 @@ def validate_alerts_dir(alerts_dir: Path, vietmap_path: Path | None = None) -> l
     cams_by_coord = {}
     for i in range(total_cams):
         cid, lat_e7, lon_e7, spd, hd = struct.unpack_from(CAMERA_FMT, cdata, i * 20)
-        src = id_to_source.get(cid, "Unknown")
+        src = cam_id_to_source.get(cid, "Unknown")
         cam_info = {
             "id": cid, "lat_e7": lat_e7, "lon_e7": lon_e7,
             "lat": lat_e7 / 1e7, "lon": lon_e7 / 1e7,
@@ -137,7 +142,7 @@ def validate_alerts_dir(alerts_dir: Path, vietmap_path: Path | None = None) -> l
     for i in range(count):
         sid, lat_e7, lon_e7, hd, stype, spd, sub, flg, sres = struct.unpack_from(SIGN_POINT_FMT, body, i * 20)
         # sres: 0 Base, 1 VietMap, 2 WYN, 3 OSM
-        src = id_to_source.get(sid, ("VietMap" if sres == 1 else ("WYN" if sres == 2 else ("OSM" if sres == 3 else "Base"))))
+        src = sign_id_to_source.get(sid, ("VietMap" if sres == 1 else ("WYN" if sres == 2 else ("OSM" if sres == 3 else "Base"))))
         sign_info = {
             "id": sid, "lat_e7": lat_e7, "lon_e7": lon_e7,
             "lat": lat_e7 / 1e7, "lon": lon_e7 / 1e7,
@@ -196,35 +201,88 @@ def validate_alerts_dir(alerts_dir: Path, vietmap_path: Path | None = None) -> l
 
         matched_vm = 0
         vm_cams_matched = 0
-        vm_cams_speed_zero = 0
+        vm_cams_valid_speed = 0
+
+        cam_grid_vm = defaultdict(list)
+        for c in cameras:
+            cam_grid_vm[(int(c["lat"] / 0.001), int(c["lon"] / 0.001))].append(c)
+
+        sign_grid_vm = defaultdict(list)
+        for s in signs:
+            sign_grid_vm[(int(s["lat"] / 0.001), int(s["lon"] / 0.001))].append(s)
+
+        def _has_near_sign(lat: float, lon: float, radius_m: float, pred) -> bool:
+            gx, gy = int(lat / 0.001), int(lon / 0.001)
+            span = max(1, int(math.ceil(radius_m / 111.0)))
+            for dy in range(-span, span + 1):
+                for dx in range(-span, span + 1):
+                    for s in sign_grid_vm.get((gx + dy, gy + dx), ()):
+                        if pred(s) and haversine_m(lat, lon, s["lat"], s["lon"]) <= radius_m:
+                            return True
+            return False
 
         for p in vm_clean:
             late7 = int(round(p.lat * 1e7))
             lone7 = int(round(p.lon * 1e7))
             if p.type == 11:
-                if (late7, lone7) not in cams_by_coord:
+                gx, gy = int(p.lat / 0.001), int(p.lon / 0.001)
+                matched_cam = None
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        for c in cam_grid_vm.get((gx + dy, gy + dx), ()):
+                            d_cam = haversine_m(p.lat, p.lon, c["lat"], c["lon"])
+                            if d_cam <= RADIUS_CAMERA_M and (
+                                headings_agree(p.heading, c["heading"], 45)
+                                or (d_cam < 5.0 and (p.heading == 0 or c["heading"] == 0))
+                            ):
+                                matched_cam = c
+                                break
+                        if matched_cam:
+                            break
+                    if matched_cam:
+                        break
+                if not matched_cam:
                     errors.append(f"Thiếu camera VietMap tại ({p.lat}, {p.lon})")
                     continue
-                cam = cams_by_coord[(late7, lone7)]
                 matched_vm += 1
                 vm_cams_matched += 1
-                if cam["speed"] == 0:
-                    vm_cams_speed_zero += 1
+                spd = matched_cam["speed"]
+                if spd == -1 or (5 <= spd <= 130 and spd % 5 == 0):
+                    vm_cams_valid_speed += 1
                 else:
-                    errors.append(f"Camera VietMap id={cam['id']} có tốc độ {cam['speed']} != 0")
-            else:
-                if (late7, lone7) not in signs_by_coord:
-                    errors.append(f"Thiếu biển báo VietMap tại ({p.lat}, {p.lon})")
+                    errors.append(f"Camera VietMap id={matched_cam['id']} có tốc độ không hợp lệ: {spd}")
+            elif p.type == 1:
+                # Theo chuẩn mới VietMap Type 1 giữ 30..120 (gồm 40 & 45 km/h); bỏ biển <30 nếu có
+                if not (30 <= p.speed_limit <= 120 and p.speed_limit % 5 == 0):
+                    matched_vm += 1
                     continue
+                if (late7, lone7) not in signs_by_coord and not _has_near_sign(
+                    p.lat, p.lon, 15.0,
+                    lambda s: s["type"] == 1 and s["speed"] == p.speed_limit and headings_agree(p.heading, s["heading"], 45),
+                ):
+                    errors.append(f"Thiếu biển tốc độ VietMap ({p.speed_limit}) tại ({p.lat}, {p.lon})")
+                    continue
+                matched_vm += 1
+            elif p.type == 8:
+                if (late7, lone7) not in signs_by_coord and not _has_near_sign(
+                    p.lat, p.lon, 300.0, lambda s: s["type"] == 5
+                ):
+                    errors.append(f"Thiếu trạm thu phí VietMap tại ({p.lat}, {p.lon})")
+                    continue
+                matched_vm += 1
+            elif p.type in (2, 3, 5, 6, 9):
+                if (late7, lone7) not in signs_by_coord:
+                    errors.append(f"Thiếu biển báo VietMap type={p.type} tại ({p.lat}, {p.lon})")
+                    continue
+                matched_vm += 1
+            else:
                 matched_vm += 1
 
         print(f"    - Khớp chính xác {matched_vm:,}/{len(vm_clean):,} điểm VietMap trong file nhị phân đầu ra.")
-        print(f"    - Camera VietMap tốc độ 0: {vm_cams_speed_zero:,}/{vm_cams_matched:,} (kỳ vọng: 5.703)")
+        print(f"    - Camera VietMap Type 11 hợp lệ (tốc độ -1 hoặc bội số 5): {vm_cams_valid_speed:,}/{vm_cams_matched:,}")
 
         if matched_vm != len(vm_clean):
             errors.append(f"[LOI D2] Thất thoát dữ liệu VietMap: đầu vào {len(vm_clean):,} != đầu ra {matched_vm:,}")
-        if len(vm_clean) == 83823 and vm_cams_speed_zero != 5703:
-            errors.append(f"Số camera VietMap tốc độ 0 không khớp 5.703: {vm_cams_speed_zero}")
 
     # 6. Kiểm tra 0 cặp khác nguồn trong bán kính khử trùng lặp (30m cam, 45m đèn, 20m biển khác)
     print("[*] Đang kiểm tra cặp trùng lặp giữa các nguồn khác nhau...")

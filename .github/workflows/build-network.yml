@@ -38,7 +38,9 @@ jobs:
         run: pip install "osmium>=3.6,<5" cryptography==50.0.1
 
       - name: Unit tests
-        run: python -m unittest test_postprocess test_urban_flags -v
+        run: |
+          python -m unittest discover -s tests -v
+          python -m unittest test_postprocess test_urban_flags -v
 
       - name: Download OSM Vietnam (verify md5)
         run: |
@@ -61,7 +63,7 @@ jobs:
           if ! assets_json=$(gh release view "$RELEASE_TAG" --json assets -q '[.assets[].name]' 2>/dev/null); then
             assets_ok=false
           else
-            for req in manifest.txt manifest.txt.sig metadata.bin.gz index.bin.gz tiles.bin.gz names.bin.gz seg_names.bin.gz lights.bin.gz osm_signs.bin.gz; do
+            for req in manifest.txt manifest.txt.sig metadata.bin.gz index.bin.gz tiles.bin.gz names.bin.gz seg_names.bin.gz lights.bin.gz osm_signs.bin.gz osm_danger_refs.json.gz; do
               if ! printf '%s\n' "$assets_json" | grep -Fq "\"$req\""; then
                 assets_ok=false
                 break
@@ -93,7 +95,14 @@ jobs:
           python urban_flags.py "$GITHUB_WORKSPACE/vietnam.osm.pbf" "$GITHUB_WORKSPACE/out" | tee urban.log
           echo "URBAN_COUNT=$(grep 'Total urban segments:' urban.log | awk '{print $NF}')" >> "$GITHUB_ENV"
 
-      - name: Package + sign
+      - name: Enrich speed limits & street names from VietMap roadsen
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          python enrich_network.py "$GITHUB_WORKSPACE/out" \
+            --vietmap sources/vietmap/secrect.bin \
+            --manifest sources/vietmap/vietmap_manifest.json | tee enrich.log
+
+      - name: Package + sign + extract rail/bridge danger refs
         if: steps.check.outputs.skip != 'true'
         env:
           MAPVIET_SIGNING_KEY: ${{ secrets.MAPVIET_SIGNING_KEY }}
@@ -104,6 +113,7 @@ jobs:
           export MAPVIET_NETWORK_VERSION="$(date -u +%Y.%m.%d.%H%M)"
           echo "VERSION=$MAPVIET_NETWORK_VERSION" >> "$GITHUB_ENV"
           python postprocess.py out release
+          python extract_osm_danger_refs.py "$GITHUB_WORKSPACE/vietnam.osm.pbf" release/osm_danger_refs.json.gz
           rm -f "$RUNNER_TEMP/key.pem"
 
       - name: Verify release package

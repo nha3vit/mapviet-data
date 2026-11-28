@@ -278,6 +278,79 @@ class TestBuildCleanAlertsRules(unittest.TestCase):
             self.assertEqual(len(rescued_opp), 1)
             self.assertEqual(rescued_opp[0]["speed"], -1)
 
+    def test_restores_40_and_45_speed_signs_per_vietmap_standard(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, signs, stats = self._run_build(
+                Path(td),
+                wyn_rows=[],
+                vm_records=[
+                    "105.840000,21.040000,1,25,0,90",   # < 30 -> bỏ
+                    "105.841000,21.040000,1,40,0,90",   # 40 km/h -> giữ theo chuẩn VietMap
+                    "105.842000,21.040000,1,45,0,90",   # 45 km/h -> giữ theo chuẩn VietMap
+                    "105.843000,21.040000,1,60,0,90",   # 60 km/h -> giữ
+                    "105.844000,21.040000,1,130,0,90",  # > 120 -> bỏ
+                ],
+            )
+            speeds = sorted(s["speed"] for s in signs if s["sign_type"] == 1)
+            self.assertEqual(speeds, [40, 45, 60])
+            self.assertEqual(stats["counts_by_source_and_type"]["VietMap"]["speed"], 3)
+
+    def test_osm_rail_bridge_danger_filter_and_wyn_st2_verification(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            wyn_csv = tmp / "wyn.csv"
+            secrect_bin = tmp / "secrect.bin"
+            curated = tmp / "curated"
+            curated.mkdir(parents=True, exist_ok=True)
+            danger_refs = tmp / "osm_danger_refs.json"
+            out_dir = tmp / "out"
+
+            _write_wyn_csv(wyn_csv, [
+                # st=2 khớp existing_cameras -> vào cameras.bin + kế thừa tốc độ 60
+                {"lat": "21.050000", "lon": "105.850000", "kind": "sign", "sign_type": "2", "speed_kmh": "0", "heading": "15"},
+                # st=2 không khớp VM4 hay existing -> bị loại
+                {"lat": "21.090000", "lon": "105.890000", "kind": "sign", "sign_type": "2", "speed_kmh": "0", "heading": "90"},
+                # Đèn giao thông hd=15 -> quy về 0xFFFF
+                {"lat": "21.060000", "lon": "105.860000", "kind": "light", "sign_type": "", "speed_kmh": "0", "heading": "15"},
+            ])
+            (curated / "existing_cameras.csv").write_text(
+                "lat,lon,speed_limit,heading\n21.050050,105.850000,60,180\n",
+                encoding="utf-8",
+            )
+            _write_secrect_bin(secrect_bin, [
+                "105.851000,21.051000,7,0,0,90",   # Type 7 gần rail_node -> giữ thành danger sign (type=10, sub=7)
+                "105.852000,21.052000,10,0,0,0",   # Type 10 gần bridge_way -> giữ thành danger sign (type=10, sub=7)
+                "105.870000,21.070000,10,0,0,0",   # Type 10 xa rail/bridge -> loại bỏ
+            ])
+            danger_refs.write_text(json.dumps({
+                "rail_nodes": [[21.051020, 105.851020]],
+                "rail_ways": [],
+                "bridge_ways": [[[21.051900, 105.851900], [21.052100, 105.852100]]],
+            }), encoding="utf-8")
+
+            stats = build_clean_alerts(
+                wyn_csv=wyn_csv,
+                secrect_bin=secrect_bin,
+                output_dir=out_dir,
+                version_str="2026.11.28.0001",
+                alerts_only=True,
+                curated_dir=curated,
+                osm_danger_refs_path=danger_refs,
+                sign_output=False,
+            )
+            cams = _read_cameras(out_dir / "cameras.bin")
+            signs = _read_signs(out_dir / "signs.bin")
+
+            self.assertEqual(len(cams), 1)
+            self.assertEqual(cams[0]["speed"], 60)
+            lights = [s for s in signs if s["sign_type"] == 6]
+            self.assertEqual(len(lights), 1)
+            self.assertEqual(lights[0]["heading"], 0xFFFF)
+
+            dangers = [s for s in signs if s["sign_type"] == 10 and s["sub_type"] == 7]
+            self.assertEqual(len(dangers), 2)
+            self.assertEqual(stats["counts_by_source_and_type"]["VietMap"]["danger_rail_bridge"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

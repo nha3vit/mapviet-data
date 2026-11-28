@@ -7,3 +7,6 @@ pipe_home/
 viethud/
 __pycache__/
 *.pyc
+
+native/roadsenz_decomp
+native/enrich_tiles

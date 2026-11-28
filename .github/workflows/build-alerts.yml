@@ -18,8 +18,12 @@ on:
       - "sources/osm/**"
       - "build_clean_alerts.py"
       - "vietmap_decode.py"
+      - "enrich_network.py"
+      - "extract_osm_danger_refs.py"
+      - "native/**"
       - "sign_manifest.py"
       - "validate_speedmap.py"
+      - "validate_alerts.py"
       - "verify_viethud.py"
       - "tests/**"
       - ".github/workflows/build-alerts.yml"
@@ -57,6 +61,19 @@ jobs:
           python -m unittest discover -s tests -v
           python -m unittest test_postprocess test_urban_flags -v
 
+      - name: Download OSM references from latest roads release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/roads_assets"
+          gh release download roads --repo "${{ github.repository }}" \
+            --pattern "osm_signs.bin.gz" \
+            --pattern "osm_danger_refs.json.gz" \
+            -D "$RUNNER_TEMP/roads_assets" || true
+          if [ -s "$RUNNER_TEMP/roads_assets/osm_signs.bin.gz" ]; then
+            gzip -df "$RUNNER_TEMP/roads_assets/osm_signs.bin.gz"
+          fi
+
       - name: Build clean nationwide alert pack & sign
         env:
           MAPVIET_SIGNING_KEY: ${{ secrets.MAPVIET_SIGNING_KEY }}
@@ -65,7 +82,21 @@ jobs:
           printf '%s\n' "$MAPVIET_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
           export MAPVIET_SIGNING_KEY_FILE="$RUNNER_TEMP/key.pem"
           export MAPVIET_ALERTS_VERSION="$(date -u +%Y.%m.%d.%H%M)"
-          python build_clean_alerts.py --vietmap sources/vietmap/secrect.bin --wyn sources/wyn/wyn_points.csv --out alerts_out --version "$MAPVIET_ALERTS_VERSION" --alerts-only
+          EXTRA_ARGS=""
+          if [ -s "$RUNNER_TEMP/roads_assets/osm_signs.bin" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --osm-signs $RUNNER_TEMP/roads_assets/osm_signs.bin"
+          fi
+          if [ -s "$RUNNER_TEMP/roads_assets/osm_danger_refs.json.gz" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --osm-danger-refs $RUNNER_TEMP/roads_assets/osm_danger_refs.json.gz"
+          fi
+          python build_clean_alerts.py \
+            --vietmap sources/vietmap/secrect.bin \
+            --vietmap-manifest sources/vietmap/vietmap_manifest.json \
+            --wyn sources/wyn/wyn_points.csv \
+            --existing-cameras sources/curated/existing_cameras.csv \
+            --out alerts_out \
+            --version "$MAPVIET_ALERTS_VERSION" \
+            --alerts-only $EXTRA_ARGS
           rm -f "$RUNNER_TEMP/key.pem"
           test -s alerts_out/manifest.txt.sig
           echo "CONTENT_SHA=$(python -c 'import json;print(json.load(open("alerts_out/stats.json"))["content_sha256"])')" >> "$GITHUB_ENV"
@@ -73,6 +104,7 @@ jobs:
       - name: Validate alert pack
         run: |
           python validate_speedmap.py alerts_out --alerts-only
+          python validate_alerts.py alerts_out --vietmap sources/vietmap/secrect.bin
 
       - name: Skip if content unchanged
         id: check
@@ -102,11 +134,12 @@ jobs:
           print(f"MapViet Clean Nationwide Alert Pack (v{s.get('version', '')})")
           print(f"version: {s.get('version', '')}")
           print(f"vietmap_version: {s.get('vietmap_version', '')}")
-          print(f"total_points: {s.get('total_points', 0)} (WYN {sum(wyn_cnt.values()):,} + OSM Lights {osm_cnt.get('light', 0):,} + Curated {sum(cur_cnt.values()):,} + VietMap {sum(vm_cnt.values()):,})")
-          print(f"cameras: {s.get('cameras_count', 0)} (WYN {wyn_cnt.get('camera', 0):,} + Curated {cur_cnt.get('camera', 0):,} + VietMap {vm_cnt.get('camera_total', 0):,})")
-          print(f"signs: {s.get('signs_count', 0)}")
-          print("\n• Tích hợp kho đèn tín hiệu thực địa OSM + WYN + Curated toàn quốc (6.269 điểm ngã tư).")
-          print("• Khử trùng lặp nội bộ WYN <= 30m cùng hướng và chặn VietMap Type 4 cứu hướng kế thừa nhầm tốc độ từ nhánh phụ <= 40 km/h hoặc cầu vượt cắt ngang.")
+          print(f"total_points: {s.get('total_points', 0)} (WYN {wyn_cnt.get('camera', 0) + wyn_cnt.get('traffic_light', 0) + wyn_cnt.get('toll', 0):,} + OSM {osm_cnt.get('traffic_light', 0) + osm_cnt.get('toll', 0) + osm_cnt.get('camera', 0):,} + Curated {cur_cnt.get('camera', 0) + cur_cnt.get('sign', 0):,} + VietMap {vm_cnt.get('camera_total', 0) + vm_cnt.get('speed', 0) + vm_cnt.get('kdc_enter', 0) + vm_cnt.get('kdc_exit', 0) + vm_cnt.get('no_overtake_start', 0) + vm_cnt.get('no_overtake_end', 0) + vm_cnt.get('toll', 0) + vm_cnt.get('tunnel', 0) + vm_cnt.get('danger_rail_bridge', 0):,})")
+          print(f"cameras: {s.get('cameras_count', 0)} (WYN {wyn_cnt.get('camera', 0):,} [st2_verified {wyn_cnt.get('camera_st2_verified', 0):,}] + Existing/Curated {cur_cnt.get('camera', 0):,} + VietMap {vm_cnt.get('camera_total', 0):,})")
+          print(f"signs: {s.get('signs_count', 0)} (tốc độ 30..120 {vm_cnt.get('speed', 0):,}, đèn WYN+OSM {wyn_cnt.get('traffic_light', 0) + osm_cnt.get('traffic_light', 0):,}, đường sắt/cầu {vm_cnt.get('danger_rail_bridge', 0):,})")
+          print("\n• Hợp nhất 5 nguồn chuẩn xác: VietMap (edogen + roadsen) + WYN + existing_cameras.csv + OSM.")
+          print("• Bảo toàn 100% camera/biển báo VietMap (gồm 40 & 45 km/h), lọc riêng VM Type 7 & Type 10 giao cắt đường sắt/cầu OSM.")
+          print("• Tự động nắn hướng camera lệch từ roadsen (bảo vệ đường đôi), khử góc lỗi đèn WYN (hd=15) & giữ đèn đối diện >20m.")
           print("• Đã ký số xác thực ECDSA P-256 bằng khoá MapViet.")
           print(f"content_sha256: {s['content_sha256']}")
           EOF

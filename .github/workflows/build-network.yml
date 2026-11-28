@@ -46,12 +46,13 @@ jobs:
         run: |
           # Geofabrik redirects *-latest to a dated file (e.g. asia/vietnam/vietnam-YYMMDD.osm.pbf);
           # resolve it once so the data, its .md5 and the date all refer to the same file.
-          REAL_URL=$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$PBF_URL")
+          CURL_OPTS="-4 --retry 5 --retry-delay 10 --retry-all-errors"
+          REAL_URL=$(curl $CURL_OPTS -fsSIL -o /dev/null -w '%{url_effective}' "$PBF_URL" || curl --retry 5 --retry-delay 10 -fsSIL -o /dev/null -w '%{url_effective}' "$PBF_URL")
           echo "Resolved: $REAL_URL"
-          curl -fsSL -o vietnam.osm.pbf "$REAL_URL"
-          curl -fsSL "$REAL_URL.md5" | awk '{print $1"  vietnam.osm.pbf"}' > pbf.md5
+          curl $CURL_OPTS -fsSL -o vietnam.osm.pbf "$REAL_URL"
+          curl $CURL_OPTS -fsSL "$REAL_URL.md5" | awk '{print $1"  vietnam.osm.pbf"}' > pbf.md5
           md5sum -c pbf.md5
-          echo "OSM_DATE=$(curl -fsSI "$REAL_URL" | awk -F': ' 'tolower($1)=="last-modified"{print $2}' | tail -1 | tr -d '\r')" >> "$GITHUB_ENV"
+          echo "OSM_DATE=$(curl $CURL_OPTS -fsSI "$REAL_URL" | awk -F': ' 'tolower($1)=="last-modified"{print $2}' | tail -1 | tr -d '\r')" >> "$GITHUB_ENV"
 
       - name: Skip if OSM unchanged since last release
         id: check
